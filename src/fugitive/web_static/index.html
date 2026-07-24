@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Fugitive 策略桌</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到游戏桌</a>
+
+  <header class="app-header">
+    <div class="brand-block" aria-label="Fugitive Strategy Table">
+      <span class="brand-mark" aria-hidden="true">42</span>
+      <div>
+        <div class="brand-name">FUGITIVE</div>
+        <div class="brand-subtitle">策略桌</div>
+      </div>
+    </div>
+    <div id="connectionStatus" class="connection-status" role="status" aria-live="polite">
+      <span class="status-dot" aria-hidden="true"></span>
+      <span class="connection-label">连接中</span>
+    </div>
+  </header>
+
+  <main id="main-content">
+    <section id="setupPanel" class="setup-band" aria-labelledby="setupTitle">
+      <div class="setup-inner">
+        <div class="section-heading setup-heading">
+          <span class="eyebrow">NEW GAME</span>
+          <h1 id="setupTitle">开始对局</h1>
+        </div>
+
+        <form id="setupForm" class="setup-form">
+          <fieldset class="form-field mode-field">
+            <legend>模式</legend>
+            <div class="segmented-control" role="radiogroup" aria-label="游戏模式">
+              <label>
+                <input type="radio" name="mode" value="human_fugitive" checked>
+                <span>扮演 Fugitive</span>
+              </label>
+              <label>
+                <input type="radio" name="mode" value="human_marshal">
+                <span>扮演 Marshal</span>
+              </label>
+              <label>
+                <input type="radio" name="mode" value="spectate">
+                <span>观战</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="form-field agent-field">
+            <label for="fugitiveAgent">Fugitive</label>
+            <div id="fugitiveHuman" class="human-slot">你 · Human</div>
+            <select id="fugitiveAgent" name="fugitive_agent" aria-label="Fugitive agent"></select>
+          </div>
+
+          <div class="form-field agent-field">
+            <label for="marshalAgent">Marshal</label>
+            <div id="marshalHuman" class="human-slot" hidden>你 · Human</div>
+            <select id="marshalAgent" name="marshal_agent" aria-label="Marshal agent"></select>
+          </div>
+
+          <div class="form-field seed-field">
+            <label for="gameSeed">随机种子</label>
+            <input id="gameSeed" name="seed" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="20" spellcheck="false" placeholder="随机">
+          </div>
+
+          <button id="startGameButton" class="primary-command start-command" type="submit" disabled>
+            开始
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <section id="gameShell" class="game-shell" aria-label="Fugitive 游戏桌" hidden>
+      <div class="status-strip">
+        <div class="status-primary">
+          <span id="roundBadge" class="round-badge">ROUND 1</span>
+          <div>
+            <div id="phaseLabel" class="phase-label">准备中</div>
+            <div id="turnLabel" class="turn-label">等待服务器状态</div>
+          </div>
+        </div>
+        <div class="status-actions">
+          <span id="sessionIdLabel" class="session-id"></span>
+          <button id="resetButton" class="icon-command" type="button" title="重置当前对局" aria-label="重置当前对局">
+            <svg aria-hidden="true"><use href="./icons.svg#rotate-ccw"></use></svg>
+          </button>
+          <button id="newGameButton" class="secondary-command" type="button">新对局</button>
+        </div>
+      </div>
+
+      <div id="outcomeBanner" class="outcome-banner" role="status" aria-live="assertive" hidden>
+        <span class="outcome-kicker">GAME OVER</span>
+        <strong id="outcomeTitle"></strong>
+        <span id="outcomeReason"></span>
+      </div>
+
+      <div class="workspace">
+        <aside class="piles-pane" aria-labelledby="pilesTitle">
+          <div class="panel-heading">
+            <span class="eyebrow">DRAW</span>
+            <h2 id="pilesTitle">牌堆</h2>
+          </div>
+          <div id="pileList" class="pile-list" aria-live="polite"></div>
+        </aside>
+
+        <section class="table-pane">
+          <div class="route-section" aria-labelledby="routeTitle">
+            <div class="table-section-heading">
+              <div>
+                <span class="eyebrow">ESCAPE ROUTE</span>
+                <h2 id="routeTitle">逃亡路线</h2>
+              </div>
+              <span id="routeSummary" class="route-summary"></span>
+            </div>
+            <div id="routeTrack" class="route-track" role="list" aria-label="逃亡路线"></div>
+          </div>
+
+          <div class="hand-section" aria-labelledby="handTitle">
+            <div class="table-section-heading compact-heading">
+              <div>
+                <span class="eyebrow">PRIVATE HAND</span>
+                <h2 id="handTitle">手牌</h2>
+              </div>
+              <span id="handSummary" class="hand-summary"></span>
+            </div>
+            <div id="handCards" class="hand-cards" role="list" aria-label="你的手牌"></div>
+          </div>
+
+          <div id="actionDock" class="action-dock" aria-labelledby="actionTitle">
+            <div class="action-title-row">
+              <div>
+                <span class="eyebrow">ACTION</span>
+                <h2 id="actionTitle">行动</h2>
+              </div>
+              <span id="actionStatus" class="action-status"></span>
+            </div>
+
+            <div id="drawAction" class="action-state" hidden>
+              <span class="action-name">选择牌堆</span>
+            </div>
+
+            <div id="fugitiveAction" class="action-state fugitive-composer" hidden>
+              <div class="composer-mode" role="group" aria-label="手牌选择用途">
+                <button class="composer-mode-button is-active" type="button" data-card-mode="hideout" aria-pressed="true">藏身处</button>
+                <button class="composer-mode-button" type="button" data-card-mode="sprint" aria-pressed="false">Sprint</button>
+              </div>
+              <div class="selection-readout">
+                <span>Hideout <strong id="selectedHideout">—</strong></span>
+                <span>距离 <strong id="selectedDistance">—</strong></span>
+                <span>需要 <strong id="requiredSprint">—</strong></span>
+                <span>已选 <strong id="selectedSprint">+0 · 0张</strong></span>
+              </div>
+              <div class="action-buttons">
+                <button id="passButton" class="secondary-command" type="button">Pass</button>
+                <button id="playHideoutButton" class="primary-command" type="button" disabled>建立藏身处</button>
+              </div>
+            </div>
+
+            <div id="marshalAction" class="action-state marshal-composer" hidden>
+              <div id="guessGrid" class="guess-grid" role="group" aria-label="选择猜测号码"></div>
+              <div class="guess-footer">
+                <span>已选 <strong id="guessCount">0</strong></span>
+                <div class="action-buttons">
+                  <button id="clearGuessButton" class="icon-command" type="button" title="清除选择" aria-label="清除猜测号码">
+                    <svg aria-hidden="true"><use href="./icons.svg#x"></use></svg>
+                  </button>
+                  <button id="submitGuessButton" class="primary-command" type="button" disabled>提交猜测</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="waitingAction" class="action-state waiting-state">
+              <span class="waiting-mark" aria-hidden="true"></span>
+              <span id="waitingText">等待行动</span>
+            </div>
+          </div>
+        </section>
+
+        <aside class="side-pane">
+          <section id="spectatorControls" class="spectator-controls" aria-labelledby="spectatorTitle" hidden>
+            <div class="panel-heading inline-heading">
+              <div>
+                <span class="eyebrow">SPECTATE</span>
+                <h2 id="spectatorTitle">观战控制</h2>
+              </div>
+              <span id="autoState" class="auto-state">PAUSED</span>
+            </div>
+            <label class="spectator-view-control" for="spectatorViewSelect">
+              <span>观战视角</span>
+              <select id="spectatorViewSelect">
+                <option value="omniscient" selected>全知</option>
+                <option value="fugitive">Fugitive</option>
+                <option value="marshal">Marshal</option>
+                <option value="public">公开</option>
+              </select>
+            </label>
+            <div class="transport-controls">
+              <button id="stepButton" class="icon-command transport-button" type="button" title="单步" aria-label="单步">
+                <svg aria-hidden="true"><use href="./icons.svg#step-forward"></use></svg>
+              </button>
+              <button id="autoButton" class="icon-command transport-button transport-primary" type="button" title="自动播放" aria-label="自动播放">
+                <svg class="play-icon" aria-hidden="true"><use href="./icons.svg#play"></use></svg>
+                <svg class="pause-icon" aria-hidden="true"><use href="./icons.svg#pause"></use></svg>
+              </button>
+              <button id="continueButton" class="icon-command transport-button transport-primary" type="button" title="继续已停滞的对局" aria-label="继续已停滞的对局" hidden>
+                <svg aria-hidden="true"><use href="./icons.svg#play"></use></svg>
+              </button>
+              <button id="terminateButton" class="icon-command transport-button" type="button" title="终止已停滞的会话" aria-label="终止已停滞的会话" hidden>
+                <svg aria-hidden="true"><use href="./icons.svg#x"></use></svg>
+              </button>
+              <label class="speed-control" for="speedSelect">
+                <span>速度</span>
+                <select id="speedSelect">
+                  <option value="1600">慢</option>
+                  <option value="850" selected>正常</option>
+                  <option value="300">快</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="session-panel" aria-labelledby="sessionTitle">
+            <div class="panel-heading">
+              <span class="eyebrow">MATCH</span>
+              <h2 id="sessionTitle">对局</h2>
+            </div>
+            <dl class="session-details">
+              <div><dt>模式</dt><dd id="modeValue">—</dd></div>
+              <div><dt>Fugitive</dt><dd id="fugitiveValue">—</dd></div>
+              <div><dt>Marshal</dt><dd id="marshalValue">—</dd></div>
+              <div><dt>视角</dt><dd id="viewerValue">—</dd></div>
+              <div><dt>Seed</dt><dd id="seedValue">—</dd></div>
+            </dl>
+            <div class="session-tools">
+              <button id="copySeedButton" class="icon-command" type="button" title="复制精确 Seed" aria-label="复制精确 Seed" hidden>
+                <svg aria-hidden="true"><use href="./icons.svg#copy"></use></svg>
+              </button>
+              <button id="exportTraceButton" class="icon-command" type="button" title="导出完整对局 Trace" aria-label="导出完整对局 Trace" hidden>
+                <svg aria-hidden="true"><use href="./icons.svg#download"></use></svg>
+              </button>
+            </div>
+          </section>
+
+          <section class="log-panel" aria-labelledby="logTitle">
+            <div class="panel-heading inline-heading">
+              <div>
+                <span class="eyebrow">GAME LOG</span>
+                <h2 id="logTitle">对局日志</h2>
+              </div>
+              <span id="logCount" class="log-count">0</span>
+            </div>
+            <ol id="gameLog" class="game-log" aria-live="polite"></ol>
+          </section>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="alert" aria-live="assertive" hidden></div>
+  <script src="./app.js" defer></script>
+</body>
+</html>
