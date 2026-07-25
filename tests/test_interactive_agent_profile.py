@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fugitive.agents.belief_informed_random import (
+from fugitive.agents.bootstrap_bir import (
     BeliefInformedRandomMarshalAgent,
 )
 from fugitive.agents.registry import (

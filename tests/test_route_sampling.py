@@ -7,7 +7,11 @@ import random
 
 import pytest
 
-from fugitive.belief import PathBelief, solve_observation_belief
+from fugitive.belief import (
+    CompiledRouteCatalogue,
+    PathBelief,
+    solve_observation_belief,
+)
 from fugitive.model import DrawRecord, GuessRecord, Observation, Phase, Role, RouteView
 
 
@@ -92,6 +96,49 @@ def test_route_sampling_rejects_empty_beliefs_and_invalid_ranks() -> None:
         nonempty.route_from_rank(nonempty.total_paths)
     with pytest.raises(TypeError, match="integer"):
         nonempty.route_from_rank(True)
+
+
+def test_compiled_route_catalogue_owns_sampling_and_optional_node_accounting() -> None:
+    class CountingBudget:
+        def __init__(self) -> None:
+            self.nodes = 0
+            self.stages: list[str] = []
+
+        def consume(self, stage: str, amount: int = 1) -> None:
+            self.nodes += amount
+            self.stages.extend([stage] * amount)
+
+    belief = PathBelief(
+        (_slot(0, 0), _slot(1, None), _slot(2, None)),
+        candidate_cards=range(1, 7),
+    )
+    budget = CountingBudget()
+    catalogue = belief.compile_route_catalogue(budget)
+
+    assert isinstance(catalogue, CompiledRouteCatalogue)
+    assert catalogue.total_paths == belief.total_paths == 9
+    assert catalogue.search_nodes == budget.nodes > 0
+    assert set(budget.stages) == {"route_completion"}
+
+    compiled_nodes = budget.nodes
+    sample = catalogue.sample(random.Random(91))
+    assert sample is not None
+    assert sample == catalogue.route_from_rank(sample.rank)
+    assert sample.total_completions == catalogue.total_paths
+    assert sample.log_q == pytest.approx(-math.log(sample.total_completions))
+    assert budget.nodes == compiled_nodes
+
+
+def test_path_belief_reuses_its_unbounded_compiled_catalogue() -> None:
+    belief = PathBelief(
+        (_slot(0, 0), _slot(1, None)),
+        candidate_cards=range(1, 4),
+    )
+
+    assert belief.compile_route_catalogue() is belief.route_catalogue
+    assert belief.sample_route(random.Random(7)) == belief.route_catalogue.sample_route(
+        random.Random(7)
+    )
 
 
 def test_solve_observation_belief_cache_is_bounded_to_256() -> None:

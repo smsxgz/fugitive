@@ -223,6 +223,46 @@ def test_later_draw_cannot_supply_an_earlier_route_prefix() -> None:
     assert belief.total_paths == 0
 
 
+def test_nonmonotonic_prefix_limits_recheck_every_pile() -> None:
+    belief = PathBelief(
+        (
+            slot(0, 0, sprint_cards=()),
+            slot(1, None, 1, None),
+            slot(2, None, 4, None),
+        ),
+        pile_hideout_limits=(0, 1, 0),
+        pile_hideout_prefix_limits=(
+            (0, 0, 0),
+            (1, 0, 0),
+            (0, 1, 0),
+        ),
+        candidate_cards=(4, 15),
+    )
+
+    assert belief.total_paths == 0
+    assert belief.route_catalogue.total_paths == 0
+
+
+def test_revealed_sprints_can_lower_another_pile_prefix_limit() -> None:
+    engine = GameEngine(seed=43)
+    engine.apply_fugitive_action(FugitiveAction(3, (24,)))
+    engine.apply_fugitive_action(FugitiveAction(15, (1, 2, 4, 6, 8)))
+    engine.draw(2)
+    engine.draw(2)
+    assert engine.apply_guess((15,))
+    engine.validate_invariants()
+
+    belief = PathBelief.from_observation(engine.observation(Role.MARSHAL))
+
+    assert belief.pile_hideout_prefix_limits == (
+        (3, 2, 0),
+        (3, 2, 0),
+        (0, 2, 0),
+    )
+    assert belief.total_paths == 1
+    assert belief.route_from_rank(0).route == (0, 3, 15)
+
+
 def test_failed_multi_guess_excludes_joint_historical_hit() -> None:
     route = (slot(0, 0, sprint_cards=()), slot(1, None), slot(2, None))
     unconstrained = PathBelief(route, candidate_cards=range(1, 7))

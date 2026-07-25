@@ -16,14 +16,13 @@ from fugitive.agents.registry import (
 from fugitive.experiment import RULES_SHA256, RULES_VERSION
 from fugitive.model import DrawRecord, GuessRecord, PlayRecord, Role
 from fugitive.observation_protocol import observation_to_canonical_data
+from fugitive.reproducibility import MAX_SEED, derive_seed
 from fugitive.web import (
-    MAX_SEED,
     SEED_DERIVATION_VERSION,
     WEB_TRACE_SCHEMA_VERSION,
     GameSession,
     SessionStore,
     WebAPIError,
-    _derive_seed,
     create_server,
 )
 
@@ -33,6 +32,7 @@ def make_session(
     seed: int | str = str(MAX_SEED),
     fugitive_agent: str = "hierarchical-random",
     marshal_agent: str = "hierarchical-random",
+    execution_profile: str = "full",
 ) -> GameSession:
     return GameSession(
         session_id="export-test",
@@ -40,6 +40,7 @@ def make_session(
         fugitive_agent=fugitive_agent,
         marshal_agent=marshal_agent,
         seed=seed,
+        execution_profile=execution_profile,
     )
 
 
@@ -112,20 +113,25 @@ def test_finished_game_export_is_strict_json_and_complete_private_trace() -> Non
     assert exported["seed_derivation"] == {
         "version": SEED_DERIVATION_VERSION,
         "master": str(MAX_SEED),
-        "deck": str(_derive_seed(MAX_SEED, "deck")),
-        "fugitive": str(_derive_seed(MAX_SEED, "fugitive")),
-        "marshal": str(_derive_seed(MAX_SEED, "marshal")),
+        "deck": str(derive_seed(MAX_SEED, "deck")),
+        "fugitive": str(derive_seed(MAX_SEED, "fugitive")),
+        "marshal": str(derive_seed(MAX_SEED, "marshal")),
     }
+    assert exported["execution_profile"] == "full"
+    assert exported["inference_events"] == []
+    assert "inference_events" not in exported["replay_manifest"]
 
     agents = exported["agents"]
     assert agents["fugitive"]["registry_name"] == "hierarchical-random"
     assert agents["fugitive"]["parameters"] == {
+        "algorithm_id": "hr-1-fugitive-hierarchical-legal-random-v1",
         "overpay_probability": 0.05,
         "max_low_cost_payments": 8,
         "max_extra_overpayments": 8,
     }
     assert agents["marshal"]["registry_name"] == "hierarchical-random"
     assert agents["marshal"]["parameters"] == {
+        "algorithm_id": "hr-1-marshal-hard-support-random-v2",
         "multi_guess_continuation": 0.1,
         "max_guess_size": 4,
         "max_guesses_per_size": 128,
@@ -162,7 +168,10 @@ def test_terminated_game_exports_saved_bir_parameters_after_agent_release() -> N
         seed=str(seed),
         fugitive_agent="belief-informed-random",
         marshal_agent="belief-informed-random",
+        execution_profile="quick",
     )
+    session.step()
+    session.step()
     session.step()
     terminated = session.terminate()
 
@@ -172,12 +181,14 @@ def test_terminated_game_exports_saved_bir_parameters_after_agent_release() -> N
     exported = session.export_trace()
     json.dumps(exported, allow_nan=False)
     assert exported["seed_derivation"]["master"] == str(seed)
+    assert exported["execution_profile"] == "quick"
+    assert exported["agents"]["marshal"]["profile"] == "interactive"
     assert exported["outcome"] == {
         "status": "terminated",
         "winner": None,
         "reason": "terminated_by_user",
         "rounds": 1,
-        "decision_count": 1,
+        "decision_count": 3,
     }
     marshal_parameters = exported["agents"]["marshal"]["parameters"]
     assert marshal_parameters["particle_count"] == INTERACTIVE_BIR_PARTICLE_COUNT
@@ -185,10 +196,18 @@ def test_terminated_game_exports_saved_bir_parameters_after_agent_release() -> N
         marshal_parameters["max_guess_candidates"]
         == INTERACTIVE_BIR_MAX_GUESS_CANDIDATES
     )
-    assert marshal_parameters["min_unique_particles"] <= marshal_parameters[
-        "particle_count"
-    ]
-    assert len(exported["trace"]) == 6
+    assert "min_unique_particles" not in marshal_parameters
+    assert marshal_parameters["belief_backend_id"] == (
+        "constructive-bootstrap-particle-filter-v1"
+    )
+    assert len(exported["trace"]) == 8
+    assert len(exported["inference_events"]) == 1
+    inference_event = exported["inference_events"][0]
+    assert inference_event["decision"] == 3
+    assert inference_event["round_number"] == 1
+    assert inference_event["role"] == "marshal"
+    assert inference_event["diagnostics"]["quality"]["particle_entries"] > 0
+    assert exported["replay_manifest"] is None
     assert all(
         event["card"] is not None
         for event in exported["trace"]

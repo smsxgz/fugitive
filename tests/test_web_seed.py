@@ -11,13 +11,12 @@ import pytest
 
 from fugitive.engine import GameEngine
 from fugitive.model import Role, Winner
+from fugitive.reproducibility import MAX_SEED, derive_seed
 from fugitive.web import (
     MAX_SAFE_JSON_INTEGER,
-    MAX_SEED,
     GameSession,
     SessionStore,
     WebAPIError,
-    _derive_seed,
     _parse_seed,
     create_server,
 )
@@ -118,14 +117,14 @@ def test_omitted_random_seed_uses_the_same_string_protocol(
 def test_master_seed_derives_distinct_replay_stable_random_streams() -> None:
     master = MAX_SEED
     derived = {
-        domain: _derive_seed(master, domain)
+        domain: derive_seed(master, domain)
         for domain in ("deck", "fugitive", "marshal")
     }
 
     assert len(set(derived.values())) == 3
     assert all(0 <= seed <= MAX_SEED for seed in derived.values())
     assert derived == {
-        domain: _derive_seed(master, domain)
+        domain: derive_seed(master, domain)
         for domain in ("deck", "fugitive", "marshal")
     }
 

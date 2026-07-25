@@ -9,10 +9,24 @@ from .engine import GameEngine
 from .model import (
     FugitiveAction,
     FugitiveAgent,
+    IllegalActionError,
     MarshalAgent,
     Phase,
     Role,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class DrawDecision:
+    pile: int
+
+
+@dataclass(frozen=True, slots=True)
+class GuessDecision:
+    numbers: tuple[int, ...]
+
+
+PlayerDecision: TypeAlias = FugitiveAction | DrawDecision | GuessDecision
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,8 +60,6 @@ class GuessTrace:
 
 
 DecisionRecord: TypeAlias = DrawTrace | FugitiveTrace | GuessTrace
-# Backward-compatible name used by the replay manifest.
-TraceRecord: TypeAlias = DecisionRecord
 
 
 class AgentStepError(RuntimeError):
@@ -68,6 +80,65 @@ class AgentStepError(RuntimeError):
         self.attempted_action = attempted_action
 
 
+def apply_decision(
+    engine: GameEngine,
+    action: PlayerDecision,
+    *,
+    decision: int,
+) -> DecisionRecord:
+    """Apply one normalized human or agent decision and return its trace."""
+
+    if isinstance(decision, bool) or not isinstance(decision, int) or decision < 1:
+        raise ValueError("decision must be a positive integer")
+    phase = engine.phase
+    if phase is Phase.TERMINAL:
+        raise RuntimeError("cannot act in a terminal game")
+    role = role_for_phase(phase)
+    if role is None:  # pragma: no cover - future engine phase guard
+        raise RuntimeError(f"unhandled engine phase: {phase}")
+    round_number = engine.observation(role).round_number
+
+    if phase in (Phase.FUGITIVE_OPENING, Phase.FUGITIVE_ACTION):
+        if not isinstance(action, FugitiveAction):
+            raise IllegalActionError("the Fugitive phase requires a Fugitive action")
+        normalized = FugitiveAction(action.hideout, tuple(action.sprint_cards))
+        engine.apply_fugitive_action(normalized)
+        return FugitiveTrace(
+            decision,
+            round_number,
+            phase,
+            Role.FUGITIVE,
+            normalized.hideout,
+            tuple(sorted(normalized.sprint_cards)),
+        )
+
+    if phase in (Phase.FUGITIVE_DRAW, Phase.MARSHAL_DRAW):
+        if not isinstance(action, DrawDecision):
+            raise IllegalActionError("a draw phase requires a pile decision")
+        card = engine.draw(action.pile)
+        return DrawTrace(
+            decision,
+            round_number,
+            phase,
+            role,
+            action.pile,
+            card,
+        )
+
+    if not isinstance(action, GuessDecision):
+        raise IllegalActionError("a Marshal guess phase requires a guess decision")
+    numbers = tuple(action.numbers)
+    success = engine.apply_guess(numbers)
+    return GuessTrace(
+        decision,
+        round_number,
+        phase,
+        Role.MARSHAL,
+        tuple(sorted(numbers)),
+        success,
+    )
+
+
 def step_agent(
     engine: GameEngine,
     fugitive_agent: FugitiveAgent,
@@ -83,15 +154,13 @@ def step_agent(
     if phase is Phase.TERMINAL:
         raise RuntimeError("cannot step a terminal game")
 
-    role = _role_for_phase(phase)
+    role = role_for_phase(phase)
     if role is None:  # pragma: no cover - future engine phase guard
         raise RuntimeError(f"unhandled engine phase: {phase}")
     try:
         observation = engine.observation(role)
     except Exception as exc:
         raise AgentStepError(exc, stage="observe", phase=phase) from exc
-    round_number = observation.round_number
-
     if phase in (Phase.FUGITIVE_OPENING, Phase.FUGITIVE_ACTION):
         try:
             raw_action = fugitive_agent.choose_fugitive_action(observation)
@@ -111,7 +180,7 @@ def step_agent(
             "sprint_cards": list(action.sprint_cards),
         }
         try:
-            engine.apply_fugitive_action(action)
+            record = apply_decision(engine, action, decision=decision)
         except Exception as exc:
             raise AgentStepError(
                 exc,
@@ -119,14 +188,8 @@ def step_agent(
                 phase=phase,
                 attempted_action=attempted,
             ) from exc
-        return FugitiveTrace(
-            decision,
-            round_number,
-            phase,
-            Role.FUGITIVE,
-            action.hideout,
-            tuple(sorted(action.sprint_cards)),
-        )
+        assert isinstance(record, FugitiveTrace)
+        return record
 
     if phase in (Phase.FUGITIVE_DRAW, Phase.MARSHAL_DRAW):
         agent = fugitive_agent if role is Role.FUGITIVE else marshal_agent
@@ -146,7 +209,11 @@ def step_agent(
             raise AgentStepError(exc, stage=choose_stage, phase=phase) from exc
         attempted = {"kind": "draw", "pile": pile}
         try:
-            card = engine.draw(pile)
+            record = apply_decision(
+                engine,
+                DrawDecision(pile),
+                decision=decision,
+            )
         except Exception as exc:
             raise AgentStepError(
                 exc,
@@ -154,7 +221,8 @@ def step_agent(
                 phase=phase,
                 attempted_action=attempted,
             ) from exc
-        return DrawTrace(decision, round_number, phase, role, pile, card)
+        assert isinstance(record, DrawTrace)
+        return record
 
     try:
         numbers = tuple(marshal_agent.choose_guess(observation))
@@ -166,7 +234,11 @@ def step_agent(
         ) from exc
     attempted = {"kind": "guess", "numbers": list(numbers)}
     try:
-        success = engine.apply_guess(numbers)
+        record = apply_decision(
+            engine,
+            GuessDecision(numbers),
+            decision=decision,
+        )
     except Exception as exc:
         raise AgentStepError(
             exc,
@@ -174,17 +246,11 @@ def step_agent(
             phase=phase,
             attempted_action=attempted,
         ) from exc
-    return GuessTrace(
-        decision,
-        round_number,
-        phase,
-        Role.MARSHAL,
-        tuple(sorted(numbers)),
-        success,
-    )
+    assert isinstance(record, GuessTrace)
+    return record
 
 
-def _role_for_phase(phase: Phase) -> Role | None:
+def role_for_phase(phase: Phase) -> Role | None:
     if phase in (
         Phase.FUGITIVE_OPENING,
         Phase.FUGITIVE_DRAW,
@@ -199,9 +265,13 @@ def _role_for_phase(phase: Phase) -> Role | None:
 __all__ = [
     "AgentStepError",
     "DecisionRecord",
+    "DrawDecision",
     "DrawTrace",
     "FugitiveTrace",
+    "GuessDecision",
     "GuessTrace",
-    "TraceRecord",
+    "PlayerDecision",
+    "apply_decision",
+    "role_for_phase",
     "step_agent",
 ]

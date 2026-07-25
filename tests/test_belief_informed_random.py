@@ -5,13 +5,16 @@ from dataclasses import replace
 import pytest
 
 from fugitive.agents.baseline_utils import epsilon_softmax
-from fugitive.agents.belief_informed_random import (
-    BeliefInformedRandomFugitiveAgent,
+from fugitive.agents.bir_fugitive import BeliefInformedRandomFugitiveAgent
+from fugitive.agents.bootstrap_bir import (
     BeliefInformedRandomMarshalAgent,
+    BootstrapParticleBeliefBackend,
 )
+from fugitive.agents.marshal_belief_policy import BeliefInformedMarshalActionPolicy
 from fugitive.engine import GameEngine, play_game
+from fugitive.inference_diagnostics import BootstrapInferenceWorkDiagnostics
 from fugitive.model import FugitiveAction, Phase, Role, Winner
-from fugitive.particle_belief import DEFAULT_PARTICLE_COUNT, MarshalParticleBelief
+from fugitive.particle_belief import MarshalParticleBelief
 from fugitive.rules import is_legal_fugitive_action, is_legal_guess
 
 
@@ -28,6 +31,16 @@ def finish_opening(
 ) -> None:
     engine.apply_fugitive_action(first)
     engine.apply_fugitive_action(second)
+
+
+def test_bir1_marshal_composes_policy_and_bootstrap_backend() -> None:
+    agent = BeliefInformedRandomMarshalAgent(7, particle_count=32)
+
+    assert isinstance(agent.action_policy, BeliefInformedMarshalActionPolicy)
+    assert isinstance(agent.belief_backend, BootstrapParticleBeliefBackend)
+    assert agent.action_policy.belief_backend is agent.belief_backend
+    assert agent.inference_diagnostics() is None
+    assert agent.belief_backend.backend_id == agent.belief_backend_id
 
 
 def test_epsilon_softmax_is_normalized_and_preserves_exploration() -> None:
@@ -323,9 +336,12 @@ def test_non_degenerate_incremental_update_samples_history_once(
 
     assert not advanced.is_empty
     assert calls == 1
-    assert agent.belief_diagnostics.incremental_updates == 1
-    assert agent.belief_diagnostics.fresh_resamples == 0
-    assert agent.belief_diagnostics.last_recovery_reason is None
+    diagnostics = agent.inference_diagnostics()
+    assert diagnostics is not None
+    assert isinstance(diagnostics.work, BootstrapInferenceWorkDiagnostics)
+    assert diagnostics.operation == "incremental_update"
+    assert diagnostics.work.incremental_update_count == 1
+    assert diagnostics.work.support_extinction_reset_count == 0
 
 
 def test_cached_belief_becomes_the_parent_of_a_new_branch(
@@ -346,8 +362,10 @@ def test_cached_belief_becomes_the_parent_of_a_new_branch(
     agent.belief(first_branch)
 
     assert agent.belief(opening) is opening_belief
-    assert agent._latest_belief is opening_belief
-    assert agent.belief_diagnostics.unique_particle_count == (
+    assert agent.belief_backend.latest_belief is opening_belief
+    diagnostics = agent.inference_diagnostics()
+    assert diagnostics is not None
+    assert diagnostics.quality.unique_worlds == (
         opening_belief.unique_particle_count
     )
 
@@ -376,9 +394,6 @@ def test_cached_belief_becomes_the_parent_of_a_new_branch(
     (
         ("particle_count", 1.5),
         ("particle_count", True),
-        ("min_unique_particles", 0),
-        ("min_unique_particles", True),
-        ("min_unique_particles", DEFAULT_PARTICLE_COUNT + 1),
         ("max_guess_candidates", 0),
         ("max_guess_candidates", 129),
         ("max_guess_candidates", 3.5),

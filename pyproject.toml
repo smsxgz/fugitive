@@ -19,6 +19,7 @@ test = ["pytest>=8"]
 [project.scripts]
 fugitive = "fugitive.web:main"
 fugitive-web = "fugitive.web:main"
+fugitive-tournament = "fugitive.tournament:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

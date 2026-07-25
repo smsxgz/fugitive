@@ -65,3 +65,35 @@ def test_finished_game_can_copy_seed_and_export_trace() -> None:
     assert "navigator.clipboard.writeText(app.game.seed)" in javascript
     assert "/export`" in javascript
     assert "new Blob" in javascript
+
+
+def test_execution_profile_is_explicit_and_resolved_parameters_are_visible() -> None:
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    assert 'name="execution_profile" value="full" checked' in html
+    assert 'name="execution_profile" value="quick"' in html
+    assert 'id="profileValue"' in html
+    assert 'id="fugitiveParameters"' in html
+    assert 'id="marshalParameters"' in html
+    assert "execution_profile: getExecutionProfile()" in javascript
+    assert '"particle_count", "max_guess_candidates", "mh_steps_per_chain"' in javascript
+
+
+def test_inference_panel_renders_backend_specific_diagnostics() -> None:
+    javascript = (STATIC / "app.js").read_text(encoding="utf-8")
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    stylesheet = (STATIC / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="inferencePanel"' in html
+    assert 'id="inferenceAlgorithm"' in html
+    assert 'id="inferenceWork"' in html
+    assert "function renderInference()" in javascript
+    assert 'work.kind === "bootstrap"' in javascript
+    assert 'work.kind === "constructive"' in javascript
+    assert "work.weighting_id" in javascript
+    assert 'work.kind === "sir_independent_mh"' in javascript
+    assert "work.initial_weighting_id" in javascript
+    assert "quality.hard_route_support_count" in javascript
+    assert "elements.inferencePanel.hidden = !visible" in javascript
+    assert ".inference-details" in stylesheet

@@ -9,7 +9,9 @@ instances server-side so changing perspective never mutates game state.
 from __future__ import annotations
 
 import argparse
+import copy
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,7 +23,7 @@ import random
 import secrets
 import threading
 import time
-from typing import Callable, Mapping
+from typing import Callable, Iterator, Mapping
 from urllib.parse import unquote, urlsplit
 import uuid
 
@@ -32,7 +34,17 @@ from .agents.registry import (
     FUGITIVE_AGENT_REGISTRY,
     MARSHAL_AGENT_REGISTRY,
 )
-from .driver import DrawTrace, FugitiveTrace, GuessTrace, TraceRecord, step_agent
+from .driver import (
+    DrawDecision,
+    DrawTrace,
+    FugitiveTrace,
+    GuessDecision,
+    GuessTrace,
+    DecisionRecord,
+    apply_decision,
+    role_for_phase,
+    step_agent,
+)
 from .engine import GameEngine
 from .experiment import (
     MANIFEST_SCHEMA_VERSION,
@@ -41,6 +53,11 @@ from .experiment import (
     ExperimentStatus,
     ReplayManifest,
     state_sha256,
+)
+from .inference_diagnostics import (
+    InferenceDiagnosticFailure,
+    InferenceEvent,
+    read_inference_diagnostics,
 )
 from .model import (
     FugitiveAction,
@@ -54,18 +71,24 @@ from .reproducibility import (
     AgentDescriptor,
     AgentSpec,
     SEED_DERIVATION_VERSION,
-    derive_seed as _derive_seed,
     derive_seed_bundle,
+    parse_seed,
+    thaw_parameters,
 )
 
 
 MODES = ("human_fugitive", "human_marshal", "spectate")
 SPECTATOR_VIEWS = ("omniscient", "fugitive", "marshal", "public")
+EXECUTION_PROFILES = ("full", "quick")
+_REGISTRY_PROFILE_BY_EXECUTION_PROFILE = {
+    "full": "default",
+    "quick": "interactive",
+}
+_PROFILE_UNSET = object()
 DEFAULT_AUTO_STEP_LIMIT = 10_000
 DEFAULT_SESSION_IDLE_TTL_SECONDS = 30 * 60
 DEFAULT_MAX_ACTIVE_SESSIONS = 128
 MAX_REQUEST_BYTES = 1_000_000
-MAX_SEED = (1 << 64) - 1
 MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
 WEB_TRACE_SCHEMA_VERSION = 2
 
@@ -77,12 +100,18 @@ _FUGITIVE_LABELS = {
 }
 _MARSHAL_LABELS = {
     "hierarchical-random": "Hierarchical Legal Random (HR-1)",
-    "belief-informed-random": "Belief-Informed Random (BIR-1)",
+    "belief-informed-random": "BIR-1 · Constructive Bootstrap Filter",
     "route-count-random": "Route-Count Random (HR-1.1)",
     "constructive-belief-informed-random": (
-        "Constructive Belief-Informed Random (BIR-2)"
+        "BIR-2S · Constructive SNIS · Sequential Sprint"
     ),
-    "mcmc-belief-informed-random": "MCMC Belief-Informed Random (BIR-3)",
+    "unweighted-constructive-belief-informed-random": (
+        "BIR-2U · Constructive Unweighted · Sequential Sprint"
+    ),
+    "exact-sprint-belief-informed-random": (
+        "BIR-2E · Constructive SNIS · Exact Sprint DP · very slow"
+    ),
+    "mcmc-belief-informed-random": "BIR-3 · SIR + Independent MH",
 }
 
 
@@ -94,6 +123,16 @@ class WebAPIError(Exception):
         self.status = status
         self.code = code
         self.message = message
+
+
+def _parse_execution_profile(value: object) -> str:
+    if not isinstance(value, str) or value not in EXECUTION_PROFILES:
+        raise WebAPIError(
+            HTTPStatus.BAD_REQUEST,
+            "invalid_execution_profile",
+            f"execution_profile must be one of {', '.join(EXECUTION_PROFILES)}",
+        )
+    return value
 
 
 def agent_catalog() -> dict[str, object]:
@@ -143,51 +182,20 @@ def _parse_seed(value: object) -> int | None:
     if value is None:
         return None
     if _is_integer(value):
-        if 0 <= value <= MAX_SAFE_JSON_INTEGER:
-            return value
-        raise WebAPIError(
-            HTTPStatus.BAD_REQUEST,
-            "invalid_seed",
-            "numeric seeds must be JavaScript-safe integers; send larger seeds as decimal strings",
-        )
-    if isinstance(value, str):
-        if (
-            not value
-            or len(value) > 20
-            or not value.isascii()
-            or not value.isdecimal()
-            or (len(value) > 1 and value.startswith("0"))
-        ):
+        if not 0 <= value <= MAX_SAFE_JSON_INTEGER:
             raise WebAPIError(
                 HTTPStatus.BAD_REQUEST,
                 "invalid_seed",
-                "seed must be a canonical unsigned decimal string",
+                "numeric seeds must be JavaScript-safe integers; send larger seeds as decimal strings",
             )
-        seed = int(value)
-        if seed <= MAX_SEED:
-            return seed
+    try:
+        return parse_seed(value, "master")
+    except ValueError as exc:
         raise WebAPIError(
             HTTPStatus.BAD_REQUEST,
             "invalid_seed",
-            f"seed must be at most {MAX_SEED}",
-        )
-    raise WebAPIError(
-        HTTPStatus.BAD_REQUEST,
-        "invalid_seed",
-        "seed must be a decimal string or a JavaScript-safe integer",
-    )
-
-
-def _role_for_phase(phase: Phase) -> Role | None:
-    if phase in (
-        Phase.FUGITIVE_OPENING,
-        Phase.FUGITIVE_DRAW,
-        Phase.FUGITIVE_ACTION,
-    ):
-        return Role.FUGITIVE
-    if phase in (Phase.MARSHAL_DRAW, Phase.MARSHAL_GUESS, Phase.MANHUNT):
-        return Role.MARSHAL
-    return None
+            "seed must be a canonical uint64 decimal string or a JavaScript-safe integer",
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +220,7 @@ class GameSession:
         marshal_agent: str,
         seed: int | str | None,
         spectator_view: str | None = None,
+        execution_profile: str = "full",
         auto_step_limit: int = DEFAULT_AUTO_STEP_LIMIT,
     ) -> None:
         if mode not in MODES:
@@ -233,6 +242,7 @@ class GameSession:
                 f"unknown Marshal agent {marshal_agent!r}",
             )
         parsed_seed = _parse_seed(seed)
+        parsed_execution_profile = _parse_execution_profile(execution_profile)
         if spectator_view is not None and spectator_view not in SPECTATOR_VIEWS:
             raise WebAPIError(
                 HTTPStatus.BAD_REQUEST,
@@ -258,6 +268,7 @@ class GameSession:
         self.mode = mode
         self.fugitive_agent_name = fugitive_agent
         self.marshal_agent_name = marshal_agent
+        self.execution_profile = parsed_execution_profile
         self.spectator_view = (
             spectator_view or "omniscient" if mode == "spectate" else None
         )
@@ -292,7 +303,7 @@ class GameSession:
         return None
 
     @property
-    def decision_trace(self) -> tuple[TraceRecord, ...]:
+    def decision_trace(self) -> tuple[DecisionRecord, ...]:
         """Canonical agent-decision trace, excluding automatic setup draws."""
 
         with self._lock:
@@ -314,13 +325,16 @@ class GameSession:
         assert self._seed_bundle.fugitive is not None
         assert self._seed_bundle.marshal is not None
         self.engine = GameEngine(seed=self._seed_bundle.deck)
+        registry_profile = _REGISTRY_PROFILE_BY_EXECUTION_PROFILE[
+            self.execution_profile
+        ]
         built_fugitive = FUGITIVE_AGENT_REGISTRY[self.fugitive_agent_name].build(
             self._seed_bundle.fugitive,
-            profile="interactive",
+            profile=registry_profile,
         )
         built_marshal = MARSHAL_AGENT_REGISTRY[self.marshal_agent_name].build(
             self._seed_bundle.marshal,
-            profile="interactive",
+            profile=registry_profile,
         )
         self.fugitive_player = built_fugitive.agent
         self.marshal_player = built_marshal.agent
@@ -339,8 +353,12 @@ class GameSession:
             ),
         }
         self._events = []
+        self._inference_events: list[InferenceEvent] = []
+        self._inference_diagnostic_failures: list[
+            InferenceDiagnosticFailure
+        ] = []
         self._decision_count = 0
-        self._decision_trace: list[TraceRecord] = []
+        self._decision_trace: list[DecisionRecord] = []
         # Setup draws are part of the UI history, but serialization below keeps
         # each identity private to its owner.
         setup = self.engine.observation(Role.FUGITIVE).draw_history
@@ -366,7 +384,21 @@ class GameSession:
             "class": f"{type(player).__module__}.{type(player).__qualname__}",
             "name": getattr(player, "name", type(player).__name__),
             "profile": spec.profile,
-            "parameters": dict(spec.parameters),
+            "parameters": thaw_parameters(spec.parameters),
+        }
+
+    def _serialized_agents(self) -> dict[str, object]:
+        return {
+            Role.FUGITIVE.value: {
+                "registry_name": self.fugitive_agent_name,
+                **copy.deepcopy(
+                    self._agent_configurations[Role.FUGITIVE.value]
+                ),
+            },
+            Role.MARSHAL.value: {
+                "registry_name": self.marshal_agent_name,
+                **copy.deepcopy(self._agent_configurations[Role.MARSHAL.value]),
+            },
         }
 
     def _ensure_open(self) -> None:
@@ -433,10 +465,20 @@ class GameSession:
             self._pause_reason = None
             self._closed = True
 
-    def reset(self, *, seed: int | str | None = None) -> dict[str, object]:
+    def reset(
+        self,
+        *,
+        seed: int | str | None = None,
+        execution_profile: object = _PROFILE_UNSET,
+    ) -> dict[str, object]:
         """Reset this session; omission intentionally deals a fresh game."""
 
         parsed_seed = _parse_seed(seed)
+        parsed_execution_profile = (
+            self.execution_profile
+            if execution_profile is _PROFILE_UNSET
+            else _parse_execution_profile(execution_profile)
+        )
         with self._lock:
             self._ensure_open()
             self._release_agents()
@@ -446,6 +488,7 @@ class GameSession:
             self._termination_reason = None
             self._seed_was_supplied = parsed_seed is not None
             self.seed = parsed_seed if parsed_seed is not None else secrets.randbits(64)
+            self.execution_profile = parsed_execution_profile
             try:
                 self._build_game()
             except Exception:
@@ -545,17 +588,7 @@ class GameSession:
             }
         )
 
-    def _agent_step(self) -> None:
-        if self.engine.is_terminal:
-            return
-        if self.fugitive_player is None or self.marshal_player is None:
-            raise RuntimeError("an agent has been released")
-        record = step_agent(
-            self.engine,
-            self.fugitive_player,  # type: ignore[arg-type]
-            self.marshal_player,  # type: ignore[arg-type]
-            decision=self._decision_count + 1,
-        )
+    def _record_decision(self, record: DecisionRecord) -> None:
         self._decision_trace.append(record)
         if isinstance(record, DrawTrace):
             self._record_draw(
@@ -580,10 +613,50 @@ class GameSession:
                 round_number=record.round_number,
             )
 
+    def _agent_step(self) -> None:
+        if self.engine.is_terminal:
+            return
+        if self.fugitive_player is None or self.marshal_player is None:
+            raise RuntimeError("an agent has been released")
+        record = step_agent(
+            self.engine,
+            self.fugitive_player,  # type: ignore[arg-type]
+            self.marshal_player,  # type: ignore[arg-type]
+            decision=self._decision_count + 1,
+        )
+        self._record_decision(record)
+        acting_agent = (
+            self.fugitive_player
+            if record.role is Role.FUGITIVE
+            else self.marshal_player
+        )
+        try:
+            diagnostics = read_inference_diagnostics(acting_agent)
+            if diagnostics is not None:
+                self._inference_events.append(
+                    InferenceEvent(
+                        decision=record.decision,
+                        round_number=record.round_number,
+                        phase=record.phase,
+                        role=record.role,
+                        diagnostics=diagnostics,
+                    )
+                )
+        except Exception as diagnostics_error:
+            self._inference_diagnostic_failures.append(
+                InferenceDiagnosticFailure.from_exception(
+                    decision=record.decision,
+                    round_number=record.round_number,
+                    phase=record.phase,
+                    role=record.role,
+                    error=diagnostics_error,
+                )
+            )
+
     def _advance_until_human(self, max_steps: int) -> tuple[int, bool]:
         steps = 0
         while not self.engine.is_terminal:
-            actor = _role_for_phase(self.engine.phase)
+            actor = role_for_phase(self.engine.phase)
             if actor is self.human_role:
                 break
             if steps >= max_steps:
@@ -721,39 +794,20 @@ class GameSession:
                     "game_finished",
                     "the game has already finished",
                 )
-            actor = _role_for_phase(self.engine.phase)
+            actor = role_for_phase(self.engine.phase)
             if actor is not self.human_role:
                 raise WebAPIError(
                     HTTPStatus.CONFLICT,
                     "not_human_turn",
                     "the session is currently waiting for an agent",
                 )
-            phase = self.engine.phase
-            round_number = self.engine.observation(self.human_role).round_number
             action_type = payload.get("type")
             try:
                 if action_type == "draw":
                     pile = payload.get("pile")
                     if not _is_integer(pile):
                         raise IllegalActionError("pile must be an integer")
-                    card = self.engine.draw(pile)
-                    self._decision_trace.append(
-                        DrawTrace(
-                            self._decision_count + 1,
-                            round_number,
-                            phase,
-                            actor,
-                            pile,
-                            card,
-                        )
-                    )
-                    self._record_draw(
-                        self.human_role,
-                        pile,
-                        card,
-                        phase=phase,
-                        round_number=round_number,
-                    )
+                    decision = DrawDecision(pile)
                 elif action_type in ("fugitive_action", "play"):
                     if self.human_role is not Role.FUGITIVE:
                         raise IllegalActionError("only the Fugitive can establish a Hideout")
@@ -761,68 +815,26 @@ class GameSession:
                     if not _is_integer(hideout):
                         raise IllegalActionError("hideout must be an integer")
                     sprint_cards = _integer_tuple(payload.get("sprint_cards", []), "sprint_cards")
-                    action = FugitiveAction(hideout, sprint_cards)
-                    self.engine.apply_fugitive_action(action)
-                    self._decision_trace.append(
-                        FugitiveTrace(
-                            self._decision_count + 1,
-                            round_number,
-                            phase,
-                            Role.FUGITIVE,
-                            action.hideout,
-                            tuple(sorted(action.sprint_cards)),
-                        )
-                    )
-                    self._record_fugitive_action(
-                        action,
-                        phase=phase,
-                        round_number=round_number,
-                    )
+                    decision = FugitiveAction(hideout, sprint_cards)
                 elif action_type == "pass":
                     if self.human_role is not Role.FUGITIVE:
                         raise IllegalActionError("only the Fugitive can pass")
-                    action = FugitiveAction(None)
-                    self.engine.apply_fugitive_action(action)
-                    self._decision_trace.append(
-                        FugitiveTrace(
-                            self._decision_count + 1,
-                            round_number,
-                            phase,
-                            Role.FUGITIVE,
-                            None,
-                            (),
-                        )
-                    )
-                    self._record_fugitive_action(
-                        action,
-                        phase=phase,
-                        round_number=round_number,
-                    )
+                    decision = FugitiveAction(None)
                 elif action_type == "guess":
                     if self.human_role is not Role.MARSHAL:
                         raise IllegalActionError("only the Marshal can guess")
                     numbers = _integer_tuple(payload.get("numbers"), "numbers")
-                    success = self.engine.apply_guess(numbers)
-                    self._decision_trace.append(
-                        GuessTrace(
-                            self._decision_count + 1,
-                            round_number,
-                            phase,
-                            Role.MARSHAL,
-                            tuple(sorted(numbers)),
-                            success,
-                        )
-                    )
-                    self._record_guess(
-                        tuple(sorted(numbers)),
-                        success,
-                        phase=phase,
-                        round_number=round_number,
-                    )
+                    decision = GuessDecision(numbers)
                 else:
                     raise IllegalActionError(
                         "type must be draw, fugitive_action, pass, or guess"
                     )
+                record = apply_decision(
+                    self.engine,
+                    decision,
+                    decision=self._decision_count + 1,
+                )
+                self._record_decision(record)
             except IllegalActionError as exc:
                 raise WebAPIError(
                     HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -854,7 +866,7 @@ class GameSession:
         elif viewer.role is Role.MARSHAL:
             selected = marshal_view
         else:
-            actor = _role_for_phase(self.engine.phase)
+            actor = role_for_phase(self.engine.phase)
             selected = fugitive_view if actor is Role.FUGITIVE else marshal_view
         return selected, fugitive_view, marshal_view
 
@@ -879,7 +891,7 @@ class GameSession:
             or self.human_role is None
         ):
             return empty
-        if _role_for_phase(self.engine.phase) is not self.human_role:
+        if role_for_phase(self.engine.phase) is not self.human_role:
             return empty
         if self.engine.phase in (Phase.FUGITIVE_DRAW, Phase.MARSHAL_DRAW):
             empty["draw_piles"] = list(observation.legal_draw_piles)
@@ -1020,16 +1032,8 @@ class GameSession:
                     "marshal": str(self._seed_bundle.marshal),
                 },
                 "mode": self.mode,
-                "agents": {
-                    "fugitive": {
-                        "registry_name": self.fugitive_agent_name,
-                        **self._agent_configurations[Role.FUGITIVE.value],
-                    },
-                    "marshal": {
-                        "registry_name": self.marshal_agent_name,
-                        **self._agent_configurations[Role.MARSHAL.value],
-                    },
-                },
+                "execution_profile": self.execution_profile,
+                "agents": self._serialized_agents(),
                 "outcome": {
                     "status": status,
                     "winner": winner,
@@ -1038,6 +1042,13 @@ class GameSession:
                     "decision_count": self._decision_count,
                 },
                 "trace": json.loads(json.dumps(self._events)),
+                "inference_events": [
+                    event.to_dict() for event in self._inference_events
+                ],
+                "inference_diagnostic_failures": [
+                    failure.to_dict()
+                    for failure in self._inference_diagnostic_failures
+                ],
                 "replay_manifest": replay,
                 "observations": {
                     "fugitive": observation_to_canonical_data(fugitive_view)[
@@ -1070,7 +1081,7 @@ class GameSession:
                 fugitive_hand = list(fugitive_view.hand)
             elif viewer.role is Role.MARSHAL:
                 marshal_hand = list(marshal_view.hand)
-            actor = _role_for_phase(self.engine.phase)
+            actor = role_for_phase(self.engine.phase)
             if viewer.omniscient and actor is Role.FUGITIVE:
                 selected_hand = fugitive_hand
             elif viewer.omniscient and actor is Role.MARSHAL:
@@ -1097,11 +1108,27 @@ class GameSession:
             else:
                 winner = None
                 reason = None
-                actor = _role_for_phase(self.engine.phase)
+                actor = role_for_phase(self.engine.phase)
                 status = "awaiting_human" if actor is self.human_role else "running"
+            inference_events = (
+                [event.to_dict() for event in self._inference_events]
+                if self.mode == "spectate"
+                and self.spectator_view in ("omniscient", "marshal")
+                else []
+            )
+            inference_diagnostic_failures = (
+                [
+                    failure.to_dict()
+                    for failure in self._inference_diagnostic_failures
+                ]
+                if self.mode == "spectate"
+                and self.spectator_view in ("omniscient", "marshal")
+                else []
+            )
             return {
                 "id": self.id,
                 "mode": self.mode,
+                "execution_profile": self.execution_profile,
                 "status": status,
                 "phase": observation.phase.value,
                 "round_number": observation.round_number,
@@ -1113,12 +1140,13 @@ class GameSession:
                 "spectator_view": self.spectator_view,
                 "available_spectator_views": list(SPECTATOR_VIEWS),
                 "actor": (
-                    _role_for_phase(observation.phase).value
-                    if _role_for_phase(observation.phase) is not None
+                    role_for_phase(observation.phase).value
+                    if role_for_phase(observation.phase) is not None
                     else None
                 ),
                 "fugitive_agent": self.fugitive_agent_name,
                 "marshal_agent": self.marshal_agent_name,
+                "agents": self._serialized_agents(),
                 "pile_sizes": list(observation.pile_sizes),
                 "route": [
                     {
@@ -1141,6 +1169,10 @@ class GameSession:
                 },
                 "legal_actions": self._legal_actions(observation),
                 "history": self._serialize_history(viewer, marshal_view),
+                "inference_events": inference_events,
+                "inference_diagnostic_failures": (
+                    inference_diagnostic_failures
+                ),
                 "winner": winner,
                 "reason": reason,
                 # An omitted random seed must not become a side channel into
@@ -1211,6 +1243,8 @@ def replay_manifest_from_web_trace(
 class _SessionEntry:
     session: GameSession
     last_access: float
+    active_leases: int = 0
+    retired: bool = False
 
 
 class SessionStore:
@@ -1252,15 +1286,26 @@ class SessionStore:
         self._sessions: OrderedDict[str, _SessionEntry] = OrderedDict()
         self._lock = threading.RLock()
 
-    def _remove_expired_locked(self, now: float) -> list[GameSession]:
+    def _remove_expired_locked(self, now: float) -> tuple[int, list[GameSession]]:
         if self.idle_ttl_seconds is None:
-            return []
+            return 0, []
         expired_ids = [
             session_id
             for session_id, entry in self._sessions.items()
             if now - entry.last_access >= self.idle_ttl_seconds
         ]
-        return [self._sessions.pop(session_id).session for session_id in expired_ids]
+        to_close: list[GameSession] = []
+        for session_id in expired_ids:
+            entry = self._sessions.pop(session_id)
+            session = self._retire_entry_locked(entry)
+            if session is not None:
+                to_close.append(session)
+        return len(expired_ids), to_close
+
+    @staticmethod
+    def _retire_entry_locked(entry: _SessionEntry) -> GameSession | None:
+        entry.retired = True
+        return entry.session if entry.active_leases == 0 else None
 
     @staticmethod
     def _close_sessions(sessions: list[GameSession]) -> None:
@@ -1268,12 +1313,12 @@ class SessionStore:
             session.close()
 
     def cleanup_expired(self) -> int:
-        """Release expired sessions and return the number removed."""
+        """Remove expired store entries and close sessions no longer leased."""
 
         with self._lock:
-            expired = self._remove_expired_locked(self._clock())
+            removed_count, expired = self._remove_expired_locked(self._clock())
         self._close_sessions(expired)
-        return len(expired)
+        return removed_count
 
     @property
     def active_count(self) -> int:
@@ -1281,12 +1326,13 @@ class SessionStore:
         with self._lock:
             return len(self._sessions)
 
-    def create(self, payload: Mapping[str, object]) -> GameSession:
+    def _new_session(self, payload: Mapping[str, object]) -> GameSession:
         mode = payload.get("mode", "spectate")
         fugitive_agent = payload.get("fugitive_agent", DEFAULT_FUGITIVE_AGENT)
         marshal_agent = payload.get("marshal_agent", DEFAULT_MARSHAL_AGENT)
         seed = payload.get("seed")
         spectator_view = payload.get("spectator_view")
+        execution_profile = payload.get("execution_profile", "full")
         if not isinstance(mode, str):
             raise WebAPIError(HTTPStatus.BAD_REQUEST, "invalid_mode", "mode must be a string")
         if not isinstance(fugitive_agent, str) or not isinstance(marshal_agent, str):
@@ -1295,32 +1341,73 @@ class SessionStore:
                 "invalid_agent",
                 "agent identifiers must be strings",
             )
-        session = self._session_factory(
+        return self._session_factory(
             session_id=uuid.uuid4().hex,
             mode=mode,
             fugitive_agent=fugitive_agent,
             marshal_agent=marshal_agent,
             seed=seed,  # type: ignore[arg-type]
             spectator_view=spectator_view,  # type: ignore[arg-type]
+            execution_profile=execution_profile,  # type: ignore[arg-type]
             auto_step_limit=self.auto_step_limit,
         )
+
+    def _register_session(
+        self,
+        session: GameSession,
+        *,
+        initial_leases: int,
+    ) -> _SessionEntry:
         to_close: list[GameSession]
         with self._lock:
             now = self._clock()
-            to_close = self._remove_expired_locked(now)
-            self._sessions[session.id] = _SessionEntry(session, now)
+            _removed_count, to_close = self._remove_expired_locked(now)
+            registered_entry = _SessionEntry(
+                session,
+                now,
+                active_leases=initial_leases,
+            )
+            self._sessions[session.id] = registered_entry
             self._sessions.move_to_end(session.id)
             while len(self._sessions) > self.max_active_sessions:
                 _session_id, entry = self._sessions.popitem(last=False)
-                to_close.append(entry.session)
+                evicted = self._retire_entry_locked(entry)
+                if evicted is not None:
+                    to_close.append(evicted)
         self._close_sessions(to_close)
+        return registered_entry
+
+    def create(self, payload: Mapping[str, object]) -> GameSession:
+        """Create and register a session for direct, non-request use."""
+
+        session = self._new_session(payload)
+        self._register_session(session, initial_leases=0)
         return session
 
+    @contextmanager
+    def create_lease(self, payload: Mapping[str, object]) -> Iterator[GameSession]:
+        """Create a session whose first request owns a lease immediately.
+
+        The session is constructed exactly once.  Its lease is installed in
+        the same critical section that publishes it to the store, so an LRU
+        eviction can retire but cannot close it before the caller serializes
+        the creation response.
+        """
+
+        session = self._new_session(payload)
+        entry = self._register_session(session, initial_leases=1)
+        try:
+            yield session
+        finally:
+            self._release_lease(entry)
+
     def get(self, session_id: str) -> GameSession:
+        """Return a session for local inspection; HTTP handlers use ``lease``."""
+
         session: GameSession | None = None
         with self._lock:
             now = self._clock()
-            expired = self._remove_expired_locked(now)
+            _removed_count, expired = self._remove_expired_locked(now)
             entry = self._sessions.get(session_id)
             if entry is not None:
                 entry.last_access = now
@@ -1335,23 +1422,63 @@ class SessionStore:
             )
         return session
 
-    def delete(self, session_id: str) -> None:
-        """Remove one session and promptly release its agent state."""
+    @contextmanager
+    def lease(self, session_id: str) -> Iterator[GameSession]:
+        """Keep a session alive for the duration of one concurrent request."""
 
-        deleted: GameSession | None = None
+        entry: _SessionEntry | None = None
         with self._lock:
-            expired = self._remove_expired_locked(self._clock())
-            entry = self._sessions.pop(session_id, None)
+            now = self._clock()
+            _removed_count, expired = self._remove_expired_locked(now)
+            entry = self._sessions.get(session_id)
             if entry is not None:
-                deleted = entry.session
+                entry.last_access = now
+                entry.active_leases += 1
+                self._sessions.move_to_end(session_id)
         self._close_sessions(expired)
-        if deleted is None:
+        if entry is None:
             raise WebAPIError(
                 HTTPStatus.NOT_FOUND,
                 "game_not_found",
                 f"game {session_id!r} does not exist",
             )
-        deleted.close()
+
+        try:
+            yield entry.session
+        finally:
+            self._release_lease(entry)
+
+    def _release_lease(self, entry: _SessionEntry) -> None:
+        to_close: GameSession | None = None
+        with self._lock:
+            entry.active_leases -= 1
+            if entry.active_leases < 0:  # pragma: no cover - ownership guard
+                raise RuntimeError("session lease count became negative")
+            if entry.retired and entry.active_leases == 0:
+                to_close = entry.session
+        if to_close is not None:
+            to_close.close()
+
+    def delete(self, session_id: str) -> None:
+        """Remove one session and promptly release its agent state."""
+
+        deleted: GameSession | None = None
+        found = False
+        with self._lock:
+            _removed_count, expired = self._remove_expired_locked(self._clock())
+            entry = self._sessions.pop(session_id, None)
+            if entry is not None:
+                found = True
+                deleted = self._retire_entry_locked(entry)
+        self._close_sessions(expired)
+        if not found:
+            raise WebAPIError(
+                HTTPStatus.NOT_FOUND,
+                "game_not_found",
+                f"game {session_id!r} does not exist",
+            )
+        if deleted is not None:
+            deleted.close()
 
 
 def make_handler(
@@ -1381,16 +1508,20 @@ def make_handler(
                     return
                 parts = _api_game_parts(path)
                 if parts is not None and len(parts) == 1:
-                    self._send_json(HTTPStatus.OK, store.get(parts[0]).as_dict())
+                    with store.lease(parts[0]) as session:
+                        state = session.as_dict()
+                    self._send_json(HTTPStatus.OK, state)
                     return
                 if (
                     parts is not None
                     and len(parts) == 2
                     and parts[1] == "export"
                 ):
+                    with store.lease(parts[0]) as session:
+                        exported = session.export_trace()
                     self._send_json(
                         HTTPStatus.OK,
-                        store.get(parts[0]).export_trace(),
+                        exported,
                     )
                     return
                 if path.startswith("/api/"):
@@ -1408,40 +1539,50 @@ def make_handler(
                 payload = self._read_json_object()
                 path = urlsplit(self.path).path
                 if path == "/api/games":
-                    session = store.create(payload)
-                    self._send_json(HTTPStatus.CREATED, session.as_dict())
+                    with store.create_lease(payload) as session:
+                        state = session.as_dict()
+                    self._send_json(HTTPStatus.CREATED, state)
                     return
                 parts = _api_game_parts(path)
                 if parts is None or len(parts) != 2:
                     raise WebAPIError(
                         HTTPStatus.NOT_FOUND, "endpoint_not_found", "API endpoint not found"
                     )
-                session = store.get(parts[0])
                 operation = parts[1]
-                if operation == "action":
-                    state = session.apply_human_action(payload)
-                elif operation == "step":
-                    state = session.step()
-                elif operation == "auto":
-                    max_steps = payload.get("max_steps")
-                    state = session.auto(max_steps=max_steps)  # type: ignore[arg-type]
-                elif operation == "continue":
-                    max_steps = payload.get("max_steps")
-                    state = session.continue_after_stall(
-                        max_steps=max_steps  # type: ignore[arg-type]
-                    )
-                elif operation == "terminate":
-                    state = session.terminate()
-                elif operation == "reset":
-                    state = session.reset(seed=payload.get("seed"))  # type: ignore[arg-type]
-                elif operation == "view":
-                    state = session.set_spectator_view(
-                        payload.get("spectator_view")
-                    )
-                else:
-                    raise WebAPIError(
-                        HTTPStatus.NOT_FOUND, "endpoint_not_found", "API endpoint not found"
-                    )
+                with store.lease(parts[0]) as session:
+                    if operation == "action":
+                        state = session.apply_human_action(payload)
+                    elif operation == "step":
+                        state = session.step()
+                    elif operation == "auto":
+                        max_steps = payload.get("max_steps")
+                        state = session.auto(max_steps=max_steps)  # type: ignore[arg-type]
+                    elif operation == "continue":
+                        max_steps = payload.get("max_steps")
+                        state = session.continue_after_stall(
+                            max_steps=max_steps  # type: ignore[arg-type]
+                        )
+                    elif operation == "terminate":
+                        state = session.terminate()
+                    elif operation == "reset":
+                        state = session.reset(
+                            seed=payload.get("seed"),  # type: ignore[arg-type]
+                            execution_profile=(
+                                payload["execution_profile"]
+                                if "execution_profile" in payload
+                                else _PROFILE_UNSET
+                            ),
+                        )
+                    elif operation == "view":
+                        state = session.set_spectator_view(
+                            payload.get("spectator_view")
+                        )
+                    else:
+                        raise WebAPIError(
+                            HTTPStatus.NOT_FOUND,
+                            "endpoint_not_found",
+                            "API endpoint not found",
+                        )
                 self._send_json(HTTPStatus.OK, state)
             except WebAPIError as exc:
                 self._send_api_error(exc)
@@ -1652,6 +1793,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised through CLI use
 
 
 __all__ = [
+    "EXECUTION_PROFILES",
     "GameSession",
     "SessionStore",
     "WebAPIError",

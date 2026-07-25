@@ -24,6 +24,7 @@ DEFAULT_EPSILON = 0.10
 DEFAULT_MULTI_GUESS_CONTINUATION = 0.10
 DEFAULT_MAX_GUESS_SIZE = 3
 DEFAULT_MAX_JOINT_CANDIDATES = 48
+HR11_MARSHAL_ALGORITHM_ID = "hr-1.1-marshal-route-count-random-v1"
 _MANHUNT_ALPHA = 2.0
 _JOINT_ROUTE_SAMPLE_MULTIPLIER = 8
 
@@ -117,6 +118,7 @@ class RouteCountRandomMarshalAgent:
             )
 
         self.rng = make_rng(seed, rng)
+        self.algorithm_id = HR11_MARSHAL_ALGORITHM_ID
         self.alpha = float(alpha)
         self.epsilon = float(epsilon)
         self.multi_guess_continuation = float(multi_guess_continuation)
@@ -272,5 +274,6 @@ __all__ = [
     "DEFAULT_MAX_GUESS_SIZE",
     "DEFAULT_MAX_JOINT_CANDIDATES",
     "DEFAULT_MULTI_GUESS_CONTINUATION",
+    "HR11_MARSHAL_ALGORITHM_ID",
     "RouteCountRandomMarshalAgent",
 ]

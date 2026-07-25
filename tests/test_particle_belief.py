@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import random
 
 import pytest
 
 from fugitive.engine import GameEngine
 from fugitive.model import FugitiveAction, Phase, Role
+from fugitive.observation_validation import ObservationContractError
 from fugitive.particle_belief import (
     DEFAULT_PARTICLE_COUNT,
     MarshalParticle,
     MarshalParticleBelief,
+)
+from fugitive.particle_inference.bootstrap_filter import (
+    _advance_play,
+    _matching_incremental_plays,
 )
 from fugitive.rules import (
     PILE_CARDS,
@@ -90,6 +96,26 @@ def test_default_population_and_complete_particle_invariants() -> None:
     assert 0.0 <= belief.probability_fugitive_can_play_42() <= 1.0
 
 
+def test_fresh_constructive_belief_is_complete_and_deterministic() -> None:
+    _, observation = opening_observation()
+    first = MarshalParticleBelief.from_observation(
+        observation,
+        particle_count=32,
+        seed=7,
+    )
+    second = MarshalParticleBelief.from_observation(
+        observation,
+        particle_count=32,
+        seed=7,
+    )
+
+    assert first.particles == second.particles
+    assert len(first.particles) == 32
+    assert first.sampling_accepted == 32
+    assert first.sampling_attempts >= 32
+    assert not first.sampling_exhausted
+
+
 def test_world_identity_excludes_particle_weight() -> None:
     _engine, observation = opening_observation()
     sampled = MarshalParticleBelief.from_observation(
@@ -111,6 +137,67 @@ def test_world_identity_excludes_particle_weight() -> None:
 
     assert belief.particles[0].world_key == belief.particles[1].world_key
     assert belief.unique_particle_count == 1
+    assert belief.effective_sample_size == pytest.approx(1.6)
+    assert belief.world_effective_sample_size == pytest.approx(1.0)
+    assert belief.max_world_mass == pytest.approx(1.0)
+    assert belief.unique_hidden_hypothesis_count == 1
+
+
+@pytest.mark.parametrize(
+    "weight",
+    (-1.0, float("nan"), float("inf"), float("-inf")),
+)
+def test_particle_weights_fail_fast(weight: float) -> None:
+    _engine, observation = opening_observation()
+    particle = MarshalParticleBelief.from_observation(
+        observation, particle_count=1, seed=23
+    ).particles[0]
+
+    with pytest.raises(ValueError, match="finite non-negative"):
+        MarshalParticleBelief(
+            observation,
+            (replace(particle, weight=weight),),
+            sampling_attempts=1,
+            sampling_exhausted=False,
+        )
+
+
+def test_zero_total_particle_mass_fails_fast() -> None:
+    _engine, observation = opening_observation()
+    particle = MarshalParticleBelief.from_observation(
+        observation, particle_count=1, seed=23
+    ).particles[0]
+
+    with pytest.raises(ValueError, match="positive finite mass"):
+        MarshalParticleBelief(
+            observation,
+            (replace(particle, weight=0.0),),
+            sampling_attempts=1,
+            sampling_exhausted=False,
+        )
+
+
+def test_incremental_update_aggregates_duplicate_world_mass() -> None:
+    _engine, observation = opening_observation()
+    particle = MarshalParticleBelief.from_observation(
+        observation, particle_count=1, seed=23
+    ).particles[0]
+    belief = MarshalParticleBelief(
+        observation,
+        (
+            replace(particle, weight=0.25),
+            replace(particle, weight=0.75),
+        ),
+        sampling_attempts=2,
+        sampling_exhausted=False,
+    )
+
+    advanced = belief.advance_to(observation, particle_count=2, seed=9)
+
+    assert len(advanced.particles) == 1
+    assert advanced.particles[0].weight == pytest.approx(1.0)
+    assert advanced.resampling_count == 0
+    assert advanced.world_effective_sample_size == pytest.approx(1.0)
 
 
 def test_indistinguishable_private_worlds_have_identical_summary() -> None:
@@ -228,26 +315,15 @@ def test_draw_posterior_and_private_draw_conditioning() -> None:
     )
 
 
-def test_sparse_support_resamples_and_contradiction_is_safe() -> None:
+def test_fresh_constructive_belief_rejects_bad_input_contract() -> None:
     _, observation = opening_observation(seed=13)
-    sparse = MarshalParticleBelief.from_observation(
-        observation,
-        particle_count=16,
-        seed=4,
-        max_attempts=1,
-    )
-    assert len(sparse.particles) == 16
-    assert sparse.sampling_exhausted
-    assert sparse.unique_particle_count == 1
-
     contradictory = replace(observation, pile_sizes=(0, 0, 0))
-    empty = MarshalParticleBelief.from_observation(
-        contradictory, particle_count=16, seed=4
-    )
-    assert empty.is_empty
-    assert empty.sampling_exhausted
-    assert dict(empty.marginals) == {}
-    assert dict(empty.draw_card_posterior(0)) == {}
+    with pytest.raises(ObservationContractError):
+        MarshalParticleBelief.from_observation(
+            contradictory,
+            particle_count=16,
+            seed=4,
+        )
 
 
 @pytest.mark.parametrize("particle_count", (True, 0, -1, 1.5, "64"))
@@ -294,7 +370,9 @@ def test_incremental_own_draw_conditions_the_remaining_pile() -> None:
 
     assert not advanced.is_empty
     assert advanced.observation == target
-    assert len(advanced.particles) == 64
+    # Adaptive filtering keeps the surviving weighted support when ESS is
+    # healthy instead of resampling back to a cosmetic fixed entry count.
+    assert 0 < len(advanced.particles) <= 64
     assert all(card in particle.marshal_hand for particle in advanced.particles)
     assert all(
         card not in particle.remaining_piles[0]
@@ -322,6 +400,8 @@ def test_incremental_hidden_fugitive_draw_propagates_every_possible_identity() -
     advanced = belief.advance_to(target, particle_count=64, seed=5)
 
     assert not advanced.is_empty
+    assert advanced.resampling_count > belief.resampling_count
+    assert advanced.pre_resample_effective_sample_size > 0.0
     assert all(
         len(particle.fugitive_draws) == old_draw_count + 1
         for particle in advanced.particles
@@ -387,6 +467,68 @@ def test_incremental_hidden_play_uses_hand_and_actual_sprint_parity() -> None:
             (action.hideout, *action.sprint_cards),
             particle.route_hideouts[-2],
             allow_pass=False,
+        )
+
+
+def test_incremental_hidden_play_conserves_each_parent_mass() -> None:
+    engine, _ = opening_observation(seed=41)
+    engine.draw(2)
+    engine.draw(2)
+    assert not engine.apply_guess((41,))
+    engine.draw(0)
+    observation = engine.observation(Role.MARSHAL)
+    belief = MarshalParticleBelief.from_observation(
+        observation,
+        particle_count=128,
+        seed=44,
+    )
+
+    fugitive_observation = engine.observation(Role.FUGITIVE)
+    public_action = next(
+        action
+        for action in legal_fugitive_actions(
+            fugitive_observation,
+            max_sprint_cards=1,
+            include_pass=False,
+        )
+        if action.hideout != 42 and len(action.sprint_cards) == 1
+    )
+    engine.apply_fugitive_action(public_action)
+    target = engine.observation(Role.MARSHAL)
+    record = target.play_history[-1]
+    slot = target.route[record.route_index or 0]
+
+    candidates: dict[int, MarshalParticle] = {}
+    for particle in belief.particles:
+        actions = _matching_incremental_plays(
+            particle,
+            record,
+            slot_hideout=slot.hideout,
+            slot_sprint_cards=slot.sprint_cards,
+            rng=random.Random(17),
+            limit=64,
+        )
+        if actions:
+            candidates.setdefault(len(actions), particle)
+        if len(candidates) >= 2:
+            break
+    assert len(candidates) >= 2
+
+    for parent_weight, particle in zip(
+        (0.25, 0.75),
+        candidates.values(),
+        strict=True,
+    ):
+        children = _advance_play(
+            (replace(particle, weight=parent_weight),),
+            record,
+            target,
+            rng=random.Random(17),
+            max_proposals=64,
+        )
+        assert len(children) > 0
+        assert sum(child.weight for child in children) == pytest.approx(
+            parent_weight
         )
 
 

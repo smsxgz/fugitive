@@ -29,6 +29,8 @@ DEFAULT_OVERPAY_PROBABILITY = 0.05
 DEFAULT_MULTI_GUESS_CONTINUATION = 0.10
 DEFAULT_MAX_GUESS_SIZE = 4
 DEFAULT_MAX_GUESSES_PER_SIZE = 128
+HR1_FUGITIVE_ALGORITHM_ID = "hr-1-fugitive-hierarchical-legal-random-v1"
+HR1_MARSHAL_ALGORITHM_ID = "hr-1-marshal-hard-support-random-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +391,7 @@ class HierarchicalRandomFugitiveAgent:
         if max_extra_overpayments < 0:
             raise ValueError("max_extra_overpayments must be non-negative")
         self.rng = make_rng(seed, rng)
+        self.algorithm_id = HR1_FUGITIVE_ALGORITHM_ID
         self.overpay_probability = overpay_probability
         self.max_low_cost_payments = max_low_cost_payments
         self.max_extra_overpayments = max_extra_overpayments
@@ -598,6 +601,7 @@ class HierarchicalRandomMarshalAgent:
         if max_guesses_per_size < 1:
             raise ValueError("max_guesses_per_size must be positive")
         self.rng = make_rng(seed, rng)
+        self.algorithm_id = HR1_MARSHAL_ALGORITHM_ID
         self.multi_guess_continuation = multi_guess_continuation
         self.max_guess_size = max_guess_size
         self.max_guesses_per_size = max_guesses_per_size
@@ -736,6 +740,8 @@ __all__ = [
     "DEFAULT_MAX_LOW_COST_PAYMENTS",
     "DEFAULT_MULTI_GUESS_CONTINUATION",
     "DEFAULT_OVERPAY_PROBABILITY",
+    "HR1_FUGITIVE_ALGORITHM_ID",
+    "HR1_MARSHAL_ALGORITHM_ID",
     "HierarchicalRandomFugitiveAgent",
     "HierarchicalRandomMarshalAgent",
     "OpeningPlan",

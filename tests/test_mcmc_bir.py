@@ -4,25 +4,29 @@ import math
 
 import pytest
 
-from fugitive.agents.hierarchical_random import HierarchicalRandomFugitiveAgent
+from fugitive.agents.bootstrap_bir import BeliefInformedRandomMarshalAgent
+from fugitive.agents.marshal_belief_policy import BeliefInformedMarshalActionPolicy
 from fugitive.agents.mcmc_bir import (
     DEFAULT_MCMC_PARTICLE_COUNT,
     DEFAULT_MH_STEPS_PER_CHAIN,
     MCMCBeliefConstructionError,
     MCMCBeliefInformedRandomMarshalAgent,
+    MCMCMarshalBeliefBackend,
 )
-from fugitive.constructive_belief import (
-    ConstructiveSampleBatch,
-    ConstructiveSamplingReport,
-    ConstructiveWorldSampler,
-)
-from fugitive.engine import GameEngine, play_game
+from fugitive.engine import GameEngine
 from fugitive.experiment import (
     ExperimentStatus,
     replay_manifest,
     run_registered_experiment,
 )
 from fugitive.model import FugitiveAction, Role
+from fugitive.inference.constructive_metadata import constructive_observation_hash
+from fugitive.inference.constructive_sampler import ConstructiveWorldSampler
+from fugitive.inference.worlds import (
+    ConstructiveSampleBatch,
+    ConstructiveSamplingReport,
+)
+from fugitive.inference_diagnostics import IndependentMHInferenceWorkDiagnostics
 from fugitive.rejuvenation import IncompleteProposalBatchError
 
 
@@ -43,6 +47,8 @@ class _RecordingSampler:
         self.delegate = ConstructiveWorldSampler(sprint_backend="sequential")
         self.sprint_backend = self.delegate.sprint_backend
         self.target = self.delegate.target
+        self.target_id = self.delegate.target_id
+        self.proposal_kernel_id = self.delegate.proposal_kernel_id
         self.requested: list[int] = []
 
     def sample_batch(self, observation, *, particle_count, **kwargs):
@@ -54,14 +60,18 @@ class _RecordingSampler:
         )
 
 
-def _incomplete_batch(particle_count: int) -> ConstructiveSampleBatch:
+def _incomplete_batch(
+    particle_count: int,
+    observation,
+    sampler: _RecordingSampler,
+) -> ConstructiveSampleBatch:
     return ConstructiveSampleBatch(
         worlds=(),
         report=ConstructiveSamplingReport(
             requested=particle_count,
             produced=0,
             proposals=1,
-            rejected_routes=1,
+            dead_end_route_proposals=1,
             rejected_targets=0,
             search_nodes=1,
             degraded=True,
@@ -70,13 +80,16 @@ def _incomplete_batch(particle_count: int) -> ConstructiveSampleBatch:
             exhausted_stage=None,
             unique_worlds=0,
         ),
+        proposal_kernel_id=sampler.proposal_kernel_id,
+        target_id=sampler.target_id,
+        observation_hash=constructive_observation_hash(observation),
     )
 
 
 class _FailFirstBatchSampler(_RecordingSampler):
-    def sample_batch(self, _observation, *, particle_count, **_kwargs):
+    def sample_batch(self, observation, *, particle_count, **_kwargs):
         self.requested.append(particle_count)
-        return _incomplete_batch(particle_count)
+        return _incomplete_batch(particle_count, observation, self)
 
 
 class _FailSecondBatchSampler(_RecordingSampler):
@@ -88,7 +101,7 @@ class _FailSecondBatchSampler(_RecordingSampler):
                 particle_count=particle_count,
                 **kwargs,
             )
-        return _incomplete_batch(particle_count)
+        return _incomplete_batch(particle_count, observation, self)
 
 
 def _agent(seed: int, **kwargs) -> MCMCBeliefInformedRandomMarshalAgent:
@@ -105,6 +118,9 @@ def test_mcmc_bir_defaults_are_balanced() -> None:
 
     assert agent.particle_count == DEFAULT_MCMC_PARTICLE_COUNT == 1_000
     assert agent.mh_steps_per_chain == DEFAULT_MH_STEPS_PER_CHAIN == 1
+    assert isinstance(agent.action_policy, BeliefInformedMarshalActionPolicy)
+    assert isinstance(agent.belief_backend, MCMCMarshalBeliefBackend)
+    assert not isinstance(agent, BeliefInformedRandomMarshalAgent)
 
 
 @pytest.mark.parametrize("steps", (True, 0, -1, 1.5, "1"))
@@ -161,21 +177,21 @@ def test_mcmc_bir_publishes_equal_weights_and_auditable_diagnostics() -> None:
 
     belief = agent.belief(observation)
     weights = tuple(particle.weight for particle in belief.particles)
-    diagnostics = agent.last_rejuvenation_diagnostics
-    initial_report = agent.last_initial_sampling_report
-    proposal_report = agent.last_mh_proposal_report
+    diagnostics = agent.inference_diagnostics()
 
     assert len(weights) == 24
     assert weights == pytest.approx((1.0 / 24,) * 24)
     assert math.isclose(sum(weights), 1.0)
     assert diagnostics is not None
-    assert diagnostics.chains == 24
-    assert diagnostics.steps_per_chain == 1
-    assert diagnostics.proposals == 24
-    assert 0 <= diagnostics.changed <= diagnostics.accepted <= 24
-    assert 1 <= diagnostics.final_unique_worlds <= 24
-    assert initial_report is not None and initial_report.produced == 24
-    assert proposal_report is not None and proposal_report.produced == 24
+    assert isinstance(diagnostics.work, IndependentMHInferenceWorkDiagnostics)
+    work = diagnostics.work
+    assert work.chains == 24
+    assert work.steps_per_chain == 1
+    assert work.mh_proposals == 24
+    assert 0 <= work.changed <= work.accepted <= 24
+    assert 1 <= diagnostics.quality.unique_worlds <= 24
+    assert work.initial_sampling.produced == 24
+    assert work.mh_proposal_sampling.produced == 24
 
 
 def test_mcmc_bir_fails_closed_when_initial_batch_is_incomplete() -> None:
@@ -189,9 +205,8 @@ def test_mcmc_bir_fails_closed_when_initial_batch_is_incomplete() -> None:
     with pytest.raises(MCMCBeliefConstructionError, match="BIR-3"):
         agent.belief(observation)
 
-    assert observation not in agent._belief_cache
-    assert agent.last_initial_sampling_report is None
-    assert agent.last_rejuvenation_diagnostics is None
+    assert agent.belief_backend.cache_size == 0
+    assert agent.inference_diagnostics() is None
 
 
 def test_mcmc_bir_fails_closed_when_mh_proposal_batch_is_incomplete() -> None:
@@ -204,25 +219,8 @@ def test_mcmc_bir_fails_closed_when_mh_proposal_batch_is_incomplete() -> None:
 
     assert sampler.requested == [24, 24]
     assert caught.value.report.termination_reason == "max_proposals"
-    assert observation not in agent._belief_cache
-    assert agent.last_initial_sampling_report is None
-    assert agent.last_mh_proposal_report is None
-    assert agent.last_rejuvenation_diagnostics is None
-
-
-def test_small_mcmc_bir_marshal_finishes_a_complete_game() -> None:
-    fugitive = HierarchicalRandomFugitiveAgent(100)
-    marshal = MCMCBeliefInformedRandomMarshalAgent(
-        200,
-        particle_count=8,
-        max_guess_candidates=16,
-    )
-
-    result = play_game(fugitive, marshal, seed=0)
-
-    assert result.winner is not None
-    assert result.reason
-    assert marshal.last_rejuvenation_diagnostics is not None
+    assert agent.belief_backend.cache_size == 0
+    assert agent.inference_diagnostics() is None
 
 
 def test_registered_small_mcmc_bir_game_replays_exactly() -> None:

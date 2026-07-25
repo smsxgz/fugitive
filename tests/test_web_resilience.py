@@ -12,6 +12,7 @@ import pytest
 
 from fugitive.agents.registry import INTERACTIVE_BIR_PARTICLE_COUNT
 from fugitive.model import Phase
+from fugitive.particle_inference.state import DEFAULT_PARTICLE_COUNT
 from fugitive.web import GameSession, SessionStore, WebAPIError, create_server
 
 
@@ -45,9 +46,9 @@ def make_session(*, auto_step_limit: int = 10_000) -> GameSession:
     )
 
 
-def test_web_session_uses_interactive_agent_profile() -> None:
+def test_web_session_defaults_to_full_agent_profile() -> None:
     session = GameSession(
-        session_id="interactive-profile-test",
+        session_id="full-profile-test",
         mode="spectate",
         fugitive_agent="belief-informed-random",
         marshal_agent="belief-informed-random",
@@ -55,7 +56,77 @@ def test_web_session_uses_interactive_agent_profile() -> None:
     )
 
     assert session.marshal_player is not None
+    assert session.marshal_player.particle_count == DEFAULT_PARTICLE_COUNT
+    state = session.as_dict()
+    assert state["execution_profile"] == "full"
+    assert state["agents"]["marshal"]["profile"] == "default"
+    assert (
+        state["agents"]["marshal"]["parameters"]["particle_count"]
+        == DEFAULT_PARTICLE_COUNT
+    )
+
+
+def test_quick_profile_is_explicit_and_reset_preserves_it() -> None:
+    session = GameSession(
+        session_id="quick-profile-test",
+        mode="spectate",
+        fugitive_agent="belief-informed-random",
+        marshal_agent="belief-informed-random",
+        seed=7,
+        execution_profile="quick",
+    )
+
+    assert session.marshal_player is not None
     assert session.marshal_player.particle_count == INTERACTIVE_BIR_PARTICLE_COUNT
+    assert session.as_dict()["agents"]["marshal"]["profile"] == "interactive"
+
+    reset = session.reset(seed=8)
+
+    assert reset["execution_profile"] == "quick"
+    assert reset["agents"]["marshal"]["profile"] == "interactive"
+    assert session.marshal_player is not None
+    assert session.marshal_player.particle_count == INTERACTIVE_BIR_PARTICLE_COUNT
+
+
+def test_invalid_execution_profile_is_rejected_without_resetting_session() -> None:
+    session = make_session()
+    original_engine = session.engine
+
+    with pytest.raises(WebAPIError) as created:
+        GameSession(
+            session_id="invalid-profile-test",
+            mode="spectate",
+            fugitive_agent="hierarchical-random",
+            marshal_agent="hierarchical-random",
+            seed=7,
+            execution_profile="slow",
+        )
+    assert created.value.status == HTTPStatus.BAD_REQUEST
+    assert created.value.code == "invalid_execution_profile"
+
+    with pytest.raises(WebAPIError) as reset:
+        session.reset(execution_profile="slow")
+    assert reset.value.status == HTTPStatus.BAD_REQUEST
+    assert reset.value.code == "invalid_execution_profile"
+    assert session.engine is original_engine
+    assert session.execution_profile == "full"
+
+    with pytest.raises(WebAPIError) as null_reset:
+        session.reset(execution_profile=None)
+    assert null_reset.value.code == "invalid_execution_profile"
+
+
+def test_session_store_validates_and_forwards_execution_profile_payload() -> None:
+    store = SessionStore()
+    quick = store.create({**HR_GAME, "execution_profile": "quick"})
+
+    assert quick.execution_profile == "quick"
+    assert quick.as_dict()["agents"]["marshal"]["profile"] == "interactive"
+
+    with pytest.raises(WebAPIError) as invalid:
+        store.create({**HR_GAME, "execution_profile": "benchmark"})
+    assert invalid.value.status == HTTPStatus.BAD_REQUEST
+    assert invalid.value.code == "invalid_execution_profile"
 
 
 def request_json(
@@ -187,6 +258,130 @@ def test_session_store_enforces_lru_capacity_and_releases_evicted_agents() -> No
     assert evicted.value.code == "game_not_found"
 
 
+def test_session_delete_waits_for_an_active_request_lease() -> None:
+    store = SessionStore(idle_ttl_seconds=None)
+    session = store.create(HR_GAME)
+
+    with store.lease(session.id) as leased:
+        assert leased is session
+        store.delete(session.id)
+        assert session.fugitive_player is not None
+        assert session.marshal_player is not None
+        with pytest.raises(WebAPIError) as removed:
+            store.get(session.id)
+        assert removed.value.code == "game_not_found"
+
+    assert session.fugitive_player is None
+    assert session.marshal_player is None
+
+
+def test_expiry_counts_a_leased_entry_before_its_deferred_close() -> None:
+    clock = FakeClock()
+    store = SessionStore(
+        idle_ttl_seconds=10,
+        clock=clock,
+    )
+    session = store.create(HR_GAME)
+
+    with store.lease(session.id):
+        clock.advance(10)
+
+        assert store.cleanup_expired() == 1
+        assert store.active_count == 0
+        assert store.cleanup_expired() == 0
+        assert session.fugitive_player is not None
+        assert session.marshal_player is not None
+
+    assert session.fugitive_player is None
+    assert session.marshal_player is None
+
+
+def test_create_lease_keeps_the_creation_response_safe_during_lru_eviction() -> None:
+    store = SessionStore(
+        idle_ttl_seconds=None,
+        max_active_sessions=1,
+    )
+
+    with store.create_lease(HR_GAME) as first:
+        second = store.create({**HR_GAME, "seed": 8})
+
+        with pytest.raises(WebAPIError) as evicted:
+            store.get(first.id)
+        assert evicted.value.code == "game_not_found"
+        assert first.fugitive_player is not None
+        assert first.marshal_player is not None
+        assert first.as_dict()["id"] == first.id
+
+    assert first.fugitive_player is None
+    assert first.marshal_player is None
+    assert store.get(second.id) is second
+
+
+def test_http_creation_holds_lease_until_initial_state_is_serialized(
+    tmp_path: Path,
+) -> None:
+    serialization_started = threading.Event()
+    allow_serialization = threading.Event()
+
+    class BlockingCreationSession(GameSession):
+        block_initial_state = False
+
+        def as_dict(self) -> dict[str, object]:
+            if self.block_initial_state:
+                serialization_started.set()
+                if not allow_serialization.wait(timeout=5):
+                    raise TimeoutError("test did not release creation serialization")
+            return super().as_dict()
+
+    sessions: list[BlockingCreationSession] = []
+
+    def session_factory(**kwargs) -> BlockingCreationSession:
+        session = BlockingCreationSession(**kwargs)
+        session.block_initial_state = not sessions
+        sessions.append(session)
+        return session
+
+    store = SessionStore(
+        idle_ttl_seconds=None,
+        max_active_sessions=1,
+        session_factory=session_factory,
+    )
+    server, server_thread, base = start_server(tmp_path, store=store)
+    response: list[tuple[int, dict[str, object]]] = []
+    request_error: list[BaseException] = []
+
+    def create_over_http() -> None:
+        try:
+            response.append(
+                request_json(f"{base}/api/games", method="POST", body=HR_GAME)
+            )
+        except BaseException as exc:  # pragma: no cover - assertion reports it
+            request_error.append(exc)
+
+    request_thread = threading.Thread(target=create_over_http)
+    request_thread.start()
+    try:
+        assert serialization_started.wait(timeout=5)
+        first = sessions[0]
+        store.create({**HR_GAME, "seed": 8})
+
+        assert first.fugitive_player is not None
+        assert first.marshal_player is not None
+        allow_serialization.set()
+        request_thread.join(timeout=5)
+
+        assert not request_thread.is_alive()
+        assert request_error == []
+        assert response[0][0] == HTTPStatus.CREATED
+        assert response[0][1]["id"] == first.id
+        assert first.fugitive_player is None
+        assert first.marshal_player is None
+    finally:
+        allow_serialization.set()
+        request_thread.join(timeout=5)
+        stop_server(server, server_thread)
+
+
 def test_session_store_expires_idle_sessions_with_injected_clock() -> None:
     clock = FakeClock()
     store = SessionStore(
@@ -258,8 +453,8 @@ def test_http_continue_terminate_and_delete_lifecycle(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("store_method", "http_method", "path", "body"),
     [
-        ("get", "GET", "/api/games/boom", None),
-        ("create", "POST", "/api/games", {}),
+        ("lease", "GET", "/api/games/boom", None),
+        ("create_lease", "POST", "/api/games", {}),
         ("delete", "DELETE", "/api/games/boom", None),
     ],
 )

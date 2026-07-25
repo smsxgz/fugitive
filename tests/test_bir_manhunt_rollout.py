@@ -4,11 +4,10 @@ from types import MethodType
 
 import pytest
 
-from fugitive.agents.belief_informed_random import (
-    BeliefInformedRandomFugitiveAgent,
-    BeliefInformedRandomMarshalAgent,
-)
+from fugitive.agents.bir_fugitive import BeliefInformedRandomFugitiveAgent
+from fugitive.agents.bootstrap_bir import BeliefInformedRandomMarshalAgent
 from fugitive.engine import GameEngine
+from fugitive.inference_diagnostics import BootstrapInferenceWorkDiagnostics
 from fugitive.model import FugitiveAction, Observation, Phase, Role, RouteView
 
 
@@ -98,7 +97,7 @@ def test_marshal_manhunt_policy_parameters_are_configurable() -> None:
         manhunt_alpha=1.0,
     )
 
-    distribution = agent._manhunt_distribution(  # type: ignore[arg-type]
+    distribution = agent.action_policy._manhunt_distribution(  # type: ignore[arg-type]
         observation,
         _FakeBelief(),
     )
@@ -121,16 +120,26 @@ def test_manhunt_configuration_is_strict(agent, kwargs) -> None:
         agent(**kwargs)
 
 
-def test_belief_diagnostics_expose_particle_quality() -> None:
+def test_inference_diagnostics_expose_particle_quality() -> None:
     engine = GameEngine(seed=5)
     engine.apply_fugitive_action(FugitiveAction(1))
     engine.apply_fugitive_action(FugitiveAction(2))
     agent = BeliefInformedRandomMarshalAgent(7, particle_count=32)
     agent.belief(engine.observation(Role.MARSHAL))
 
-    diagnostics = agent.belief_diagnostics
-    assert diagnostics.particle_count == 32
-    assert 1 <= diagnostics.unique_particle_count <= 32
-    assert 0.0 < diagnostics.effective_sample_size <= 32
-    assert diagnostics.sampling_attempts >= diagnostics.particle_count
-    assert 0.0 < diagnostics.sampling_acceptance_rate <= 1.0
+    diagnostics = agent.inference_diagnostics()
+    assert diagnostics is not None
+    assert isinstance(diagnostics.work, BootstrapInferenceWorkDiagnostics)
+    assert diagnostics.quality.requested_particles == 32
+    assert diagnostics.quality.particle_entries == 32
+    assert 1 <= diagnostics.quality.unique_worlds <= 32
+    assert 0.0 < diagnostics.quality.entry_ess <= 32
+    assert (
+        diagnostics.work.origin_fresh_sampling_proposals
+        >= diagnostics.quality.particle_entries
+    )
+    assert (
+        0.0
+        < diagnostics.work.origin_fresh_sampling_acceptance_rate
+        <= 1.0
+    )

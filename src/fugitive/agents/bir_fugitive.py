@@ -1,20 +1,12 @@
-"""Information-set random baselines for both roles.
-
-The policies here stay stochastic, but randomize over a small hierarchy of
-meaningful decisions.  Every distribution method consumes only an immutable
-``Observation``.  The Marshal's private-world hypotheses are sampled by
-``MarshalParticleBelief``; the engine and its deck order are never inspected.
-"""
+"""Belief-informed random policy for the Fugitive role."""
 
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, replace
-import hashlib
-import itertools
+from dataclasses import replace
 import math
 import random
-from typing import Callable, Hashable, Iterable, Mapping, TypeVar
+from typing import Callable, Iterable, Mapping
 
 from fugitive.belief import BeliefResult, PathBelief
 from fugitive.model import (
@@ -26,19 +18,20 @@ from fugitive.model import (
     Role,
     RouteView,
 )
-from fugitive.observation_protocol import (
-    canonical_random_state_bytes,
-    stable_observation_seed,
-)
-from fugitive.particle_belief import (
-    DEFAULT_PARTICLE_COUNT,
-    MarshalDrawOutcomeStatistics,
-    MarshalParticleBelief,
-)
+from fugitive.observation_protocol import stable_observation_seed
 from fugitive.rules import sprint_value
 
 from .base import make_rng
 from .baseline_utils import epsilon_softmax, possible_draw_cards, sample_distribution
+from .bir_common import (
+    ChoiceT,
+    DEFAULT_EPSILON,
+    DEFAULT_MANHUNT_ALPHA,
+    DEFAULT_MANHUNT_EPSILON,
+    DEFAULT_TEMPERATURE,
+    normalized as _normalized,
+    validate_manhunt_parameters as _validate_manhunt_parameters,
+)
 from .hierarchical_random import (
     DEFAULT_MAX_EXTRA_OVERPAYMENTS,
     DEFAULT_MAX_LOW_COST_PAYMENTS,
@@ -55,63 +48,12 @@ from .hierarchical_random import (
 )
 
 
-DEFAULT_EPSILON = 0.15
-DEFAULT_TEMPERATURE = 0.7
-DEFAULT_MANHUNT_EPSILON = 0.10
-DEFAULT_MANHUNT_ALPHA = 2.0
 DEFAULT_MANHUNT_ROLLOUTS = 32
-DEFAULT_MAX_GUESS_CANDIDATES = 128
-DEFAULT_MIN_UNIQUE_PARTICLE_FRACTION = 0.01
-
-
-ChoiceT = TypeVar("ChoiceT", bound=Hashable)
-
-
-@dataclass(frozen=True, slots=True)
-class MarshalBeliefDiagnostics:
-    """Observable counters for incremental particle-belief maintenance."""
-
-    incremental_updates: int
-    fresh_resamples: int
-    minimum_unique_particles: int
-    last_incremental_particle_count: int | None
-    last_incremental_unique_particle_count: int | None
-    last_recovery_reason: str | None
-    particle_count: int
-    unique_particle_count: int
-    effective_sample_size: float
-    sampling_attempts: int
-    sampling_acceptance_rate: float
-    sampling_exhausted: bool
+BIR1_FUGITIVE_ALGORITHM_ID = "bir-1-fugitive-information-set-random-v1"
 
 
 def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
-
-
-def _normalized(weights: Mapping[ChoiceT, float]) -> dict[ChoiceT, float]:
-    positive = {
-        action: weight for action, weight in weights.items() if weight > 0.0
-    }
-    total = sum(positive.values())
-    if total <= 0.0:
-        return {}
-    return {action: weight / total for action, weight in positive.items()}
-
-
-def _stable_seed(observation: Observation, salt: str) -> int:
-    return stable_observation_seed(
-        observation,
-        domain="bir.marshal.particle-belief.v1",
-        salt=salt,
-    )
-
-
-def _validate_manhunt_parameters(epsilon: float, alpha: float) -> None:
-    if not math.isfinite(epsilon) or not 0.0 <= epsilon <= 1.0:
-        raise ValueError("manhunt_epsilon must be between zero and one")
-    if not math.isfinite(alpha) or alpha <= 0.0:
-        raise ValueError("manhunt_alpha must be positive")
 
 
 class BeliefInformedRandomFugitiveAgent:
@@ -162,6 +104,7 @@ class BeliefInformedRandomFugitiveAgent:
         ):
             raise ValueError("manhunt_rollouts must be a positive integer")
         self.rng = make_rng(seed, rng)
+        self.algorithm_id = BIR1_FUGITIVE_ALGORITHM_ID
         self.epsilon = epsilon
         self.temperature = temperature
         self.overpay_probability = overpay_probability
@@ -313,6 +256,7 @@ class BeliefInformedRandomFugitiveAgent:
                     )
                     leaf_distribution = epsilon_softmax(
                         {plan: scores[plan] for plan in leaves},
+
                         epsilon=self.epsilon,
                         temperature=self.temperature,
                     )
@@ -513,6 +457,7 @@ class BeliefInformedRandomFugitiveAgent:
                         )
                         for card in support
                     )
+
                     / len(support)
                 )
         catch_risk = self._public_catch_risk(observation)
@@ -713,6 +658,7 @@ class BeliefInformedRandomFugitiveAgent:
         self._shadow_cache[shadow] = result
         return result
 
+
     @staticmethod
     def _marshal_shadow(
         observation: Observation,
@@ -796,479 +742,9 @@ class BeliefInformedRandomFugitiveAgent:
         return tuple(sorted(card for card in hand if card not in spent))
 
 
-class BeliefInformedRandomMarshalAgent:
-    """BIR-1 Marshal using observation-only complete-world particles."""
-
-    name = "belief-informed-random-marshal"
-
-    def __init__(
-        self,
-        seed: int | random.Random | None = None,
-        *,
-        rng: random.Random | None = None,
-        epsilon: float = DEFAULT_EPSILON,
-        temperature: float = DEFAULT_TEMPERATURE,
-        particle_count: int = DEFAULT_PARTICLE_COUNT,
-        min_unique_particles: int | None = None,
-        max_guess_candidates: int = DEFAULT_MAX_GUESS_CANDIDATES,
-        terminal_bonus_scale: float = 1.0,
-        manhunt_epsilon: float = DEFAULT_MANHUNT_EPSILON,
-        manhunt_alpha: float = DEFAULT_MANHUNT_ALPHA,
-    ) -> None:
-        if not math.isfinite(epsilon) or not 0.0 <= epsilon <= 1.0:
-            raise ValueError("epsilon must be between zero and one")
-        if not math.isfinite(temperature) or temperature <= 0.0:
-            raise ValueError("temperature must be positive")
-        if (
-            isinstance(particle_count, bool)
-            or not isinstance(particle_count, int)
-            or particle_count <= 0
-        ):
-            raise ValueError("particle_count must be a positive integer")
-        if (
-            isinstance(max_guess_candidates, bool)
-            or not isinstance(max_guess_candidates, int)
-            or not 1 <= max_guess_candidates <= DEFAULT_MAX_GUESS_CANDIDATES
-        ):
-            raise ValueError("max_guess_candidates must be from 1 through 128")
-        if not math.isfinite(terminal_bonus_scale) or terminal_bonus_scale < 0.0:
-            raise ValueError("terminal_bonus_scale must be finite and non-negative")
-        _validate_manhunt_parameters(manhunt_epsilon, manhunt_alpha)
-        if min_unique_particles is None:
-            min_unique_particles = min(
-                particle_count,
-                max(
-                    2,
-                    math.ceil(
-                        particle_count * DEFAULT_MIN_UNIQUE_PARTICLE_FRACTION
-                    ),
-                ),
-            )
-        elif (
-            isinstance(min_unique_particles, bool)
-            or not isinstance(min_unique_particles, int)
-            or not 1 <= min_unique_particles <= particle_count
-        ):
-            raise ValueError(
-                "min_unique_particles must be from 1 through particle_count"
-            )
-        self.rng = make_rng(seed, rng)
-        self.epsilon = epsilon
-        self.temperature = temperature
-        self.particle_count = particle_count
-        self.min_unique_particles = min_unique_particles
-        self.max_guess_candidates = max_guess_candidates
-        self.terminal_bonus_scale = terminal_bonus_scale
-        self.manhunt_epsilon = manhunt_epsilon
-        self.manhunt_alpha = manhunt_alpha
-        self._belief_salt = hashlib.sha256(
-            canonical_random_state_bytes(self.rng)
-        ).hexdigest()
-        self._belief_cache: dict[Observation, MarshalParticleBelief] = {}
-        self._latest_belief: MarshalParticleBelief | None = None
-        self._belief_incremental_updates = 0
-        self._belief_fresh_resamples = 0
-        self._last_incremental_particle_count: int | None = None
-        self._last_incremental_unique_particle_count: int | None = None
-        self._last_recovery_reason: str | None = None
-
-    @property
-    def belief_diagnostics(self) -> MarshalBeliefDiagnostics:
-        current = self._latest_belief
-        return MarshalBeliefDiagnostics(
-            incremental_updates=self._belief_incremental_updates,
-            fresh_resamples=self._belief_fresh_resamples,
-            minimum_unique_particles=self.min_unique_particles,
-            last_incremental_particle_count=(
-                self._last_incremental_particle_count
-            ),
-            last_incremental_unique_particle_count=(
-                self._last_incremental_unique_particle_count
-            ),
-            last_recovery_reason=self._last_recovery_reason,
-            particle_count=0 if current is None else len(current.particles),
-            unique_particle_count=(
-                0 if current is None else current.unique_particle_count
-            ),
-            effective_sample_size=(
-                0.0 if current is None else current.effective_sample_size
-            ),
-            sampling_attempts=(
-                0 if current is None else current.sampling_attempts
-            ),
-            sampling_acceptance_rate=(
-                0.0 if current is None else current.sampling_acceptance_rate
-            ),
-            sampling_exhausted=(
-                False if current is None else current.sampling_exhausted
-            ),
-        )
-
-    def belief(self, observation: Observation) -> MarshalParticleBelief:
-        if observation.role is not Role.MARSHAL:
-            raise ValueError("Marshal belief requires a Marshal observation")
-        cached = self._belief_cache.get(observation)
-        if cached is not None:
-            self._latest_belief = cached
-            return cached
-
-        belief_seed = _stable_seed(observation, self._belief_salt)
-        sampled: MarshalParticleBelief
-        recovery_reason: str | None = None
-        if self._latest_belief is not None:
-            try:
-                sampled = self._latest_belief.advance_to(
-                    observation,
-                    particle_count=self.particle_count,
-                    seed=belief_seed,
-                )
-            except ValueError:
-                recovery_reason = "incompatible_observation"
-            else:
-                self._belief_incremental_updates += 1
-                self._last_incremental_particle_count = len(sampled.particles)
-                self._last_incremental_unique_particle_count = (
-                    sampled.unique_particle_count
-                )
-                if sampled.is_empty:
-                    recovery_reason = "empty"
-                elif sampled.unique_particle_count < self.min_unique_particles:
-                    recovery_reason = "low_unique"
-
-            if recovery_reason is not None:
-                sampled = MarshalParticleBelief.from_observation(
-                    observation,
-                    particle_count=self.particle_count,
-                    seed=belief_seed,
-                )
-                self._belief_fresh_resamples += 1
-                self._last_recovery_reason = recovery_reason
-        else:
-            sampled = MarshalParticleBelief.from_observation(
-                observation,
-                particle_count=self.particle_count,
-                seed=belief_seed,
-            )
-        if len(self._belief_cache) >= 8:
-            self._belief_cache.pop(next(iter(self._belief_cache)))
-        self._belief_cache[observation] = sampled
-        self._latest_belief = sampled
-        return sampled
-
-    def draw_pile_distribution(self, observation: Observation) -> dict[int, float]:
-        if observation.role is not Role.MARSHAL:
-            return {}
-        belief = self.belief(observation)
-        if belief.is_empty:
-            if not observation.legal_draw_piles:
-                return {}
-            probability = 1.0 / len(observation.legal_draw_piles)
-            return {pile: probability for pile in observation.legal_draw_piles}
-
-        outcome_statistics = belief.draw_outcome_statistics()
-        scores: dict[int, float] = {}
-        for pile in observation.legal_draw_piles:
-            outcomes = outcome_statistics[pile]
-            if not outcomes:
-                continue
-            scores[pile] = sum(
-                outcome.probability
-                * self._best_guess_score_from_statistics(observation, outcome)
-                for outcome in outcomes.values()
-            )
-        if not scores:
-            return {}
-        return epsilon_softmax(
-            scores, epsilon=self.epsilon, temperature=self.temperature
-        )
-
-    def choose_draw_pile(self, observation: Observation) -> int:
-        distribution = self.draw_pile_distribution(observation)
-        if not distribution:
-            raise ValueError("there is no legal draw pile")
-        return sample_distribution(distribution, rng=self.rng)
-
-    def candidate_guess_sets(
-        self,
-        observation: Observation,
-        belief: MarshalParticleBelief | None = None,
-    ) -> tuple[tuple[int, ...], ...]:
-        belief = belief or self.belief(observation)
-        if belief.is_empty:
-            return tuple((number,) for number in hard_constraint_guess_numbers(observation))
-
-        hidden_mass: dict[tuple[int, ...], float] = defaultdict(float)
-        for particle in belief.particles:
-            hidden = tuple(sorted(belief.current_hidden_hideouts(particle)))
-            if hidden:
-                hidden_mass[hidden] += particle.weight
-        return self._candidate_guess_sets_from_masses(
-            belief.marginals,
-            hidden_mass,
-        )
-
-    def _candidate_guess_sets_from_masses(
-        self,
-        marginals: Mapping[int, float],
-        hidden_mass: Mapping[tuple[int, ...], float],
-    ) -> tuple[tuple[int, ...], ...]:
-        ordered_singles = [
-            (number,)
-            for number, _probability in sorted(
-                marginals.items(), key=lambda item: (-item[1], item[0])
-            )
-        ]
-        single_budget = (
-            len(ordered_singles)
-            if len(ordered_singles) < self.max_guess_candidates
-            else max(1, self.max_guess_candidates // 2)
-        )
-        candidates: list[tuple[int, ...]] = ordered_singles[:single_budget]
-        seen = set(candidates)
-        if len(candidates) >= self.max_guess_candidates:
-            return tuple(candidates)
-
-        likely_routes = sorted(
-            hidden_mass,
-            key=lambda route: (-hidden_mass[route], len(route), route),
-        )
-
-        def add(guess: Iterable[int]) -> bool:
-            item = tuple(sorted(guess))
-            if not item or item in seen:
-                return False
-            candidates.append(item)
-            seen.add(item)
-            return len(candidates) >= self.max_guess_candidates
-
-        for route in likely_routes[:24]:
-            if len(route) > 1 and add(route):
-                return tuple(candidates)
-            for size in range(2, min(4, len(route)) + 1):
-                for subset in itertools.combinations(route, size):
-                    if add(subset):
-                        return tuple(candidates)
-
-        return tuple(candidates)
-
-    def guess_distribution(
-        self, observation: Observation
-    ) -> dict[tuple[int, ...], float]:
-        if observation.role is not Role.MARSHAL:
-            return {}
-        belief = self.belief(observation)
-        if observation.phase is Phase.MANHUNT:
-            return self._manhunt_distribution(observation, belief)
-        if observation.phase is not Phase.MARSHAL_GUESS:
-            return {}
-
-        candidates = self.candidate_guess_sets(observation, belief)
-        if not candidates:
-            return {}
-        if belief.is_empty:
-            probability = 1.0 / len(candidates)
-            return {guess: probability for guess in candidates}
-
-        grouped: dict[int, list[tuple[int, ...]]] = defaultdict(list)
-        scores: dict[tuple[int, ...], float] = {}
-        failure_cost = self._escape_risk_after_draw(belief)
-        hidden_count = self._hidden_count(observation)
-        for guess in candidates:
-            grouped[len(guess)].append(guess)
-            scores[guess] = self._guess_score(
-                observation,
-                belief,
-                guess,
-                failure_cost=failure_cost,
-                hidden_count=hidden_count,
-            )
-        size_scores = {
-            size: max(scores[guess] for guess in guesses)
-            for size, guesses in grouped.items()
-        }
-        size_distribution = epsilon_softmax(
-            size_scores, epsilon=self.epsilon, temperature=self.temperature
-        )
-        result: dict[tuple[int, ...], float] = {}
-        for size, guesses in grouped.items():
-            conditional = epsilon_softmax(
-                {guess: scores[guess] for guess in guesses},
-                epsilon=self.epsilon,
-                temperature=self.temperature,
-            )
-            for guess, probability in conditional.items():
-                result[guess] = size_distribution[size] * probability
-        return _normalized(result)
-
-    def choose_guess(self, observation: Observation) -> tuple[int, ...]:
-        distribution = self.guess_distribution(observation)
-        if not distribution:
-            raise ValueError("there is no information-consistent Marshal guess")
-        return sample_distribution(distribution, rng=self.rng)
-
-    def _best_guess_score(
-        self,
-        observation: Observation,
-        belief: MarshalParticleBelief,
-    ) -> float:
-        candidates = self.candidate_guess_sets(observation, belief)
-        if not candidates or belief.is_empty:
-            return 0.0
-        failure_cost = self._escape_risk_after_draw(belief)
-        hidden_count = self._hidden_count(observation)
-        return max(
-            self._guess_score(
-                observation,
-                belief,
-                guess,
-                failure_cost=failure_cost,
-                hidden_count=hidden_count,
-            )
-            for guess in candidates
-        )
-
-    def _best_guess_score_from_statistics(
-        self,
-        observation: Observation,
-        statistics: MarshalDrawOutcomeStatistics,
-    ) -> float:
-        candidates = self._candidate_guess_sets_from_masses(
-            statistics.marginals,
-            statistics.hidden_route_masses,
-        )
-        if not candidates:
-            return 0.0
-        hidden_count = self._hidden_count(observation)
-        return max(
-            self._guess_score_from_success(
-                guess,
-                statistics.joint_success(guess),
-                failure_cost=statistics.escape_risk,
-                hidden_count=hidden_count,
-            )
-            for guess in candidates
-        )
-
-    def _guess_score(
-        self,
-        observation: Observation,
-        belief: MarshalParticleBelief,
-        guess: tuple[int, ...],
-        *,
-        failure_cost: float | None = None,
-        hidden_count: int | None = None,
-    ) -> float:
-        success = belief.joint_success(guess)
-        if hidden_count is None:
-            hidden_count = self._hidden_count(observation)
-        if failure_cost is None:
-            failure_cost = self._escape_risk_after_draw(belief)
-        return self._guess_score_from_success(
-            guess,
-            success,
-            failure_cost=failure_cost,
-            hidden_count=hidden_count,
-        )
-
-    def _guess_score_from_success(
-        self,
-        guess: tuple[int, ...],
-        success: float,
-        *,
-        failure_cost: float,
-        hidden_count: int,
-    ) -> float:
-        terminal_bonus = (
-            self.terminal_bonus_scale * hidden_count
-            if len(guess) == hidden_count
-            else 0.0
-        )
-        return (
-            len(guess) * success
-            + terminal_bonus * success
-            - failure_cost * (1.0 - success)
-        )
-
-    @staticmethod
-    def _escape_risk_after_draw(belief: MarshalParticleBelief) -> float:
-        if belief.is_empty:
-            return 0.0
-
-        pile_risks = [0.0, 0.0, 0.0]
-        any_nonempty = False
-        immediate_risk = 0.0
-        for particle in belief.particles:
-            hand = particle.fugitive_hand
-            previous = particle.route_hideouts[-1]
-
-            def can_escape(cards: tuple[int, ...]) -> bool:
-                return (
-                    42 in cards
-                    and previous != 42
-                    and 42 - previous
-                    <= 3
-                    + sum(
-                        sprint_value(card) for card in cards if card != 42
-                    )
-                )
-
-            if can_escape(hand):
-                immediate_risk += particle.weight
-            for pile, contents in enumerate(particle.remaining_piles):
-                if not contents:
-                    continue
-                any_nonempty = True
-                favorable = sum(
-                    can_escape(tuple(sorted((*hand, card)))) for card in contents
-                )
-                pile_risks[pile] += (
-                    particle.weight * favorable / len(contents)
-                )
-        return max(pile_risks) if any_nonempty else immediate_risk
-
-    @staticmethod
-    def _hidden_count(observation: Observation) -> int:
-        return sum(
-            index > 0 and not slot.revealed and slot.hideout != 42
-            for index, slot in enumerate(observation.route)
-        )
-
-    def _manhunt_distribution(
-        self,
-        observation: Observation,
-        belief: MarshalParticleBelief,
-    ) -> dict[tuple[int, ...], float]:
-        if belief.is_empty:
-            candidates = hard_constraint_guess_numbers(observation)
-            if not candidates:
-                return {}
-            probability = 1.0 / len(candidates)
-            return {(number,): probability for number in candidates}
-        marginals = belief.marginals
-        if not marginals:
-            return {}
-        powered = {
-            number: probability**self.manhunt_alpha
-            for number, probability in marginals.items()
-        }
-        total = sum(powered.values())
-        count = len(powered)
-        return {
-            (number,): self.manhunt_epsilon / count
-            + (1.0 - self.manhunt_epsilon) * weight / total
-            for number, weight in powered.items()
-        }
-
-
 __all__ = [
+    "BIR1_FUGITIVE_ALGORITHM_ID",
     "BeliefInformedRandomFugitiveAgent",
-    "BeliefInformedRandomMarshalAgent",
-    "DEFAULT_EPSILON",
-    "DEFAULT_MANHUNT_ALPHA",
-    "DEFAULT_MANHUNT_EPSILON",
     "DEFAULT_MANHUNT_ROLLOUTS",
-    "DEFAULT_MAX_GUESS_CANDIDATES",
-    "DEFAULT_MIN_UNIQUE_PARTICLE_FRACTION",
-    "DEFAULT_TEMPERATURE",
-    "MarshalBeliefDiagnostics",
 ]
+

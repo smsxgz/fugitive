@@ -6,16 +6,17 @@ import random
 
 import pytest
 
-from fugitive.constructive_belief import (
-    CompiledMarshalConstraints,
+from fugitive.engine import GameEngine
+from fugitive.inference.constraints import CompiledMarshalConstraints
+from fugitive.inference.constructive_metadata import constructive_observation_hash
+from fugitive.inference.constructive_sampler import ConstructiveWorldSampler
+from fugitive.inference.sampling import SamplingBudget
+from fugitive.inference.worlds import (
     ConstraintUniformTarget,
     ConstructiveSampleBatch,
     ConstructiveSamplingReport,
     ConstructiveWorld,
-    ConstructiveWorldSampler,
-    SamplingBudget,
 )
-from fugitive.engine import GameEngine
 from fugitive.model import FugitiveAction, Role
 from fugitive.rejuvenation import (
     IncompleteProposalBatchError,
@@ -45,7 +46,7 @@ def _report(
         requested=requested,
         produced=produced,
         proposals=produced,
-        rejected_routes=0,
+        dead_end_route_proposals=0,
         rejected_targets=0,
         search_nodes=0,
         degraded=degraded,
@@ -56,8 +57,25 @@ def _report(
     )
 
 
-def _batch(worlds: tuple[ConstructiveWorld, ...]) -> ConstructiveSampleBatch:
-    return ConstructiveSampleBatch(worlds, _report(len(worlds), len(worlds)))
+_TEST_SAMPLER = ConstructiveWorldSampler(sprint_backend="sequential")
+
+
+def _batch(
+    worlds: tuple[ConstructiveWorld, ...],
+    *,
+    observation=None,
+    report: ConstructiveSamplingReport | None = None,
+    proposal_kernel_id: str = _TEST_SAMPLER.proposal_kernel_id,
+    target_id: str = _TEST_SAMPLER.target_id,
+) -> ConstructiveSampleBatch:
+    observation = observation or _opening_observation()
+    return ConstructiveSampleBatch(
+        worlds,
+        report or _report(len(worlds), len(worlds)),
+        proposal_kernel_id=proposal_kernel_id,
+        target_id=target_id,
+        observation_hash=constructive_observation_hash(observation),
+    )
 
 
 def _distinct_worlds(count: int = 8):
@@ -76,6 +94,8 @@ def _distinct_worlds(count: int = 8):
 class _FixedSampler:
     target = ConstraintUniformTarget()
     sprint_backend = "sequential"
+    target_id = _TEST_SAMPLER.target_id
+    proposal_kernel_id = _TEST_SAMPLER.proposal_kernel_id
 
     def __init__(
         self,
@@ -89,7 +109,7 @@ class _FixedSampler:
 
     def sample_batch(
         self,
-        _observation,
+        observation,
         *,
         particle_count: int,
         seed=None,
@@ -100,7 +120,13 @@ class _FixedSampler:
         self.calls += 1
         worlds = self.worlds[:particle_count]
         report = self.report or _report(particle_count, len(worlds))
-        return ConstructiveSampleBatch(worlds, report)
+        return _batch(
+            worlds,
+            observation=observation,
+            report=report,
+            proposal_kernel_id=self.proposal_kernel_id,
+            target_id=self.target_id,
+        )
 
 
 class _ForbiddenSampler(_FixedSampler):
@@ -157,6 +183,9 @@ def test_rejuvenation_is_same_seed_deterministic_and_equally_weighted() -> None:
     assert all(0 <= index < 12 for index in first.ancestor_indices)
     assert first.proposal_report is not None
     assert first.proposal_report.produced == 24
+    assert first.proposal_kernel_id == initial.proposal_kernel_id
+    assert first.target_id == initial.target_id
+    assert first.observation_hash == initial.observation_hash
 
 
 def test_zero_steps_only_performs_systematic_resampling() -> None:
@@ -187,7 +216,9 @@ def test_zero_steps_only_performs_systematic_resampling() -> None:
 def test_steps_per_chain_is_a_non_negative_integer(steps: object) -> None:
     observation, worlds = _distinct_worlds(1)
     with pytest.raises(ValueError, match="non-negative integer"):
-        IndependentMHRejuvenator().rejuvenate(
+        IndependentMHRejuvenator(
+            sampler=ConstructiveWorldSampler(sprint_backend="sequential")
+        ).rejuvenate(
             observation,
             _batch(worlds),
             steps_per_chain=steps,  # type: ignore[arg-type]
@@ -206,6 +237,87 @@ def test_seed_and_rng_are_mutually_exclusive() -> None:
         )
 
 
+def test_rejuvenator_requires_sampler_and_target_identity_to_match() -> None:
+    class AlternateTarget(ConstraintUniformTarget):
+        target_id = "test-alternate-target-v1"
+
+    sampler = ConstructiveWorldSampler(
+        target=AlternateTarget(),
+        sprint_backend="sequential",
+    )
+    inherited = IndependentMHRejuvenator(sampler=sampler)
+    assert inherited.target is sampler.target
+    assert inherited.target_id == sampler.target_id
+
+    with pytest.raises(ValueError, match="target IDs must match"):
+        IndependentMHRejuvenator(
+            sampler=sampler,
+            target=ConstraintUniformTarget(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "wrong_value"),
+    (
+        ("proposal_kernel_id", "wrong-proposal-kernel-v1"),
+        ("target_id", "wrong-target-v1"),
+        ("observation_hash", "wrong-observation-hash"),
+    ),
+)
+def test_initial_batch_fingerprint_is_machine_checked(
+    field_name: str,
+    wrong_value: str,
+) -> None:
+    observation, worlds = _distinct_worlds(1)
+    initial = replace(_batch(worlds), **{field_name: wrong_value})
+
+    with pytest.raises(
+        InvalidRejuvenationBatchError,
+        match=field_name,
+    ):
+        IndependentMHRejuvenator(
+            sampler=ConstructiveWorldSampler(sprint_backend="sequential")
+        ).rejuvenate(
+            observation,
+            initial,
+            steps_per_chain=0,
+            seed=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "wrong_value"),
+    (
+        ("proposal_kernel_id", "different-kernel-v1"),
+        ("target_id", "different-target-v1"),
+        ("observation_hash", "different-observation-hash"),
+    ),
+)
+def test_proposal_batch_fingerprint_is_machine_checked(
+    field_name: str,
+    wrong_value: str,
+) -> None:
+    observation, worlds = _distinct_worlds(2)
+
+    class MislabelingSampler(_FixedSampler):
+        def sample_batch(self, *args, **kwargs):
+            batch = super().sample_batch(*args, **kwargs)
+            return replace(batch, **{field_name: wrong_value})
+
+    with pytest.raises(
+        InvalidRejuvenationBatchError,
+        match=field_name,
+    ):
+        IndependentMHRejuvenator(
+            sampler=MislabelingSampler((worlds[1],))  # type: ignore[arg-type]
+        ).rejuvenate(
+            observation,
+            _batch((worlds[0],)),
+            steps_per_chain=1,
+            seed=2,
+        )
+
+
 @pytest.mark.parametrize(
     "report",
     (
@@ -215,7 +327,7 @@ def test_seed_and_rng_are_mutually_exclusive() -> None:
 )
 def test_initial_batch_must_be_complete_and_importance_valid(report) -> None:
     observation, worlds = _distinct_worlds(1)
-    initial = ConstructiveSampleBatch(worlds, report)
+    initial = _batch(worlds, report=report)
     with pytest.raises(InvalidRejuvenationBatchError):
         IndependentMHRejuvenator().rejuvenate(
             observation,
@@ -332,7 +444,9 @@ def test_duplicate_world_requires_one_aggregated_proposal_density() -> None:
         InvalidRejuvenationBatchError,
         match="aggregated world-level proposal mass",
     ):
-        IndependentMHRejuvenator().rejuvenate(
+        IndependentMHRejuvenator(
+            sampler=ConstructiveWorldSampler(sprint_backend="sequential")
+        ).rejuvenate(
             observation,
             initial,
             steps_per_chain=0,

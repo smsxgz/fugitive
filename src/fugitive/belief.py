@@ -12,12 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import cached_property, lru_cache
+import math
 import random
 from types import MappingProxyType
-from typing import Callable, Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Protocol, Sequence
 
 from fugitive.model import Observation, Role, RouteView
 from fugitive.rules import PILE_CARDS, sprint_value
+from fugitive.world_validation import compile_route_creation_rounds
 
 
 # Full public history is exact by default.  Optional limits remain available
@@ -69,6 +71,12 @@ class RouteSample:
         return Fraction(1, self.total_completions)
 
     @property
+    def log_q(self) -> float:
+        """Return the route-level log proposal mass used by inference code."""
+
+        return -math.log(self.total_completions)
+
+    @property
     def conditional_probabilities(self) -> tuple[Fraction, ...]:
         """Return each selected branch probability in route order."""
 
@@ -80,6 +88,21 @@ class RouteSample:
                 strict=True,
             )
         )
+
+
+class RouteSamplingBudget(Protocol):
+    """Optional node budget consumed while compiling a route catalogue."""
+
+    def consume(self, stage: str, amount: int = 1) -> None: ...
+
+
+class RouteSampler(Protocol):
+    """Structural API shared by compiled and custom route proposals."""
+
+    @property
+    def total_paths(self) -> int: ...
+
+    def sample(self, rng: random.Random) -> RouteSample | None: ...
 
 
 class PathBelief:
@@ -308,23 +331,10 @@ class PathBelief:
             )
         )
 
-        # Engine invariant: every nonterminal Hideout placement is followed by
-        # a Marshal guess in the same round, and observations retain guess
-        # history in chronological order.  The first record whose route length
-        # reaches a slot therefore identifies that slot's creation round.  A
-        # newly placed tail has no record yet and belongs to the current round.
-        creation_rounds = [0]
-        for index in range(1, len(observation.route)):
-            creation_rounds.append(
-                next(
-                    (
-                        record.round_number
-                        for record in observation.guess_history
-                        if record.route_length >= index
-                    ),
-                    observation.round_number,
-                )
-            )
+        creation_rounds = compile_route_creation_rounds(
+            observation,
+            require_complete_timeline=False,
+        )
         pile_hideout_prefix_limits: list[tuple[int, int, int]] = []
         public_sprints_so_far = [0, 0, 0]
         for index, (slot, creation_round) in enumerate(
@@ -483,135 +493,33 @@ class PathBelief:
         completion counts.
         """
 
-        total = self._route_completion_count()
-        if total <= 0:
-            raise ValueError("cannot sample an empty route belief")
-        return self.route_from_rank(rng.randrange(total))
+        return self.route_catalogue.sample_route(rng)
 
     def route_from_rank(self, rank: int) -> RouteSample:
         """Decode one zero-based rank from the compatible-route catalogue."""
 
-        if isinstance(rank, bool) or not isinstance(rank, int):
-            raise TypeError("route rank must be an integer")
-        total = self._route_completion_count()
-        if total <= 0:
-            raise ValueError("cannot rank routes in an empty route belief")
-        if not 0 <= rank < total:
-            raise ValueError(f"route rank must be from zero through {total - 1}")
-
-        original_rank = rank
-        route: list[int] = []
-        completion_trace = [total]
-        rank_trace = [rank]
-        previous = -1
-        counts = (0, 0, 0)
-        multi_state = self._initial_multi_state
-
-        for index in range(len(self.route)):
-            selected: tuple[int, tuple[int, int, int], int, int] | None = None
-            for value, next_counts, next_multi_state, completions in (
-                self._route_completion_options(
-                    index,
-                    previous,
-                    counts,
-                    multi_state,
-                )
-            ):
-                if rank < completions:
-                    selected = (
-                        value,
-                        next_counts,
-                        next_multi_state,
-                        completions,
-                    )
-                    break
-                rank -= completions
-            if selected is None:  # pragma: no cover - guards the DP invariant
-                raise RuntimeError("route completion counts could not decode rank")
-
-            value, counts, multi_state, completions = selected
-            route.append(value)
-            previous = value
-            completion_trace.append(completions)
-            rank_trace.append(rank)
-
-        if completion_trace[-1] != 1 or rank_trace[-1] != 0:
-            raise RuntimeError("completed route has an inconsistent rank trace")
-        return RouteSample(
-            route=tuple(route),
-            rank=original_rank,
-            total_completions=total,
-            prefix_completion_counts=tuple(completion_trace),
-            prefix_ranks=tuple(rank_trace),
-        )
-
-    def _route_completion_count(self) -> int:
-        if not self._sampling_shape_is_valid():
-            return 0
-        return self._route_completion_counter(
-            0,
-            -1,
-            (0, 0, 0),
-            self._initial_multi_state,
-        )
+        return self.route_catalogue.route_from_rank(rank)
 
     @cached_property
-    def _route_completion_counter(
-        self,
-    ) -> Callable[[int, int, tuple[int, int, int], int], int]:
-        @lru_cache(maxsize=None)
-        def count(
-            index: int,
-            previous: int,
-            pile_counts: tuple[int, int, int],
-            multi_state: int,
-        ) -> int:
-            if index == len(self.route):
-                return 1
-            return sum(
-                completions
-                for _value, _counts, _multi_state, completions
-                in self._route_completion_options(
-                    index,
-                    previous,
-                    pile_counts,
-                    multi_state,
-                )
-            )
+    def route_catalogue(self) -> "CompiledRouteCatalogue":
+        """Return the shared, unbounded completion-count catalogue."""
 
-        return count
+        return CompiledRouteCatalogue(self)
 
-    def _route_completion_options(
+    def compile_route_catalogue(
         self,
-        index: int,
-        previous: int,
-        pile_counts: tuple[int, int, int],
-        multi_state: int,
-    ) -> tuple[tuple[int, tuple[int, int, int], int, int], ...]:
-        options: list[tuple[int, tuple[int, int, int], int, int]] = []
-        cap = self._edge_cap(index) if index else None
-        for value in self._values_at(index):
-            if index and (previous >= value or value - previous > cap):
-                continue
-            next_counts = self._add_pile_card(pile_counts, value, index)
-            next_multi_state = self._advance_multi_state(
-                index,
-                value,
-                multi_state,
-            )
-            if next_counts is None or next_multi_state is None:
-                continue
-            completions = self._route_completion_counter(
-                index + 1,
-                value,
-                next_counts,
-                next_multi_state,
-            )
-            if completions:
-                options.append(
-                    (value, next_counts, next_multi_state, completions)
-                )
-        return tuple(options)
+        budget: RouteSamplingBudget | None = None,
+    ) -> "CompiledRouteCatalogue":
+        """Compile routes with an optional externally owned node budget.
+
+        The cached catalogue is reused for ordinary belief queries.  A caller
+        that supplies a budget receives an independent catalogue so its node
+        accounting is local to that inference batch.
+        """
+
+        if budget is None:
+            return self.route_catalogue
+        return CompiledRouteCatalogue(self, budget)
 
     def _sampling_shape_is_valid(self) -> bool:
         if not self._basic_shape_is_valid():
@@ -694,14 +602,16 @@ class PathBelief:
         self, counts: tuple[int, int, int], value: int, index: int
     ) -> tuple[int, int, int] | None:
         pile = _CARD_TO_PILE.get(value)
-        if pile is None:
-            return counts
         updated = list(counts)
-        updated[pile] += 1
+        if pile is not None:
+            updated[pile] += 1
         limits = self.pile_hideout_limits
         if self.pile_hideout_prefix_limits is not None:
             limits = self.pile_hideout_prefix_limits[index]
-        if limits is not None and updated[pile] > limits[pile]:
+        if limits is not None and any(
+            updated[pile_index] > limits[pile_index]
+            for pile_index in range(3)
+        ):
             return None
         return updated[0], updated[1], updated[2]
 
@@ -816,6 +726,181 @@ class PathBelief:
         return forward, backward, total
 
 
+RouteCompletionState = tuple[int, int, tuple[int, int, int], int]
+RouteCompletionOption = tuple[int, tuple[int, int, int], int, int]
+
+
+class CompiledRouteCatalogue:
+    """Completion-count catalogue for exact route sampling and unranking.
+
+    Each reachable DP state is compiled once.  Branches are stored in card
+    order, so ranks provide a stable enumeration as well as exact uniform
+    sampling.  ``budget`` is optional and deliberately structural: any owner
+    with ``consume(stage, amount)`` can supply deterministic node accounting
+    without coupling the belief module to a particular inference engine.
+    """
+
+    def __init__(
+        self,
+        belief: PathBelief,
+        budget: RouteSamplingBudget | None = None,
+        *,
+        node_stage: str = "route_completion",
+    ) -> None:
+        if not isinstance(node_stage, str) or not node_stage:
+            raise ValueError("node_stage must be a non-empty string")
+        self.belief = belief
+        self.budget = budget
+        self.node_stage = node_stage
+        self._counts: dict[RouteCompletionState, int] = {}
+        self._options: dict[
+            RouteCompletionState, tuple[RouteCompletionOption, ...]
+        ] = {}
+        self._total_paths: int | None = None
+        self._search_nodes = 0
+
+    @property
+    def total_paths(self) -> int:
+        """Number of complete routes represented by this catalogue."""
+
+        if self._total_paths is None:
+            if not self.belief._sampling_shape_is_valid():
+                self._total_paths = 0
+            else:
+                self._total_paths = self._count(
+                    0,
+                    -1,
+                    (0, 0, 0),
+                    self.belief._initial_multi_state,
+                )
+        return self._total_paths
+
+    @property
+    def search_nodes(self) -> int:
+        """Number of candidate transitions compiled successfully so far."""
+
+        return self._search_nodes
+
+    def sample(self, rng: random.Random) -> RouteSample | None:
+        """Compatibility sampler returning ``None`` for empty catalogues."""
+
+        total = self.total_paths
+        if total <= 0:
+            return None
+        return self.route_from_rank(rng.randrange(total))
+
+    def sample_route(self, rng: random.Random) -> RouteSample:
+        """Uniformly sample one route, rejecting an empty catalogue."""
+
+        sample = self.sample(rng)
+        if sample is None:
+            raise ValueError("cannot sample an empty route belief")
+        return sample
+
+    def route_from_rank(self, rank: int) -> RouteSample:
+        """Decode a zero-based rank using the compiled completion blocks."""
+
+        if isinstance(rank, bool) or not isinstance(rank, int):
+            raise TypeError("route rank must be an integer")
+        total = self.total_paths
+        if total <= 0:
+            raise ValueError("cannot rank routes in an empty route belief")
+        if not 0 <= rank < total:
+            raise ValueError(f"route rank must be from zero through {total - 1}")
+
+        original_rank = rank
+        route: list[int] = []
+        completion_trace = [total]
+        rank_trace = [rank]
+        index = 0
+        previous = -1
+        counts = (0, 0, 0)
+        multi_state = self.belief._initial_multi_state
+
+        while index < len(self.belief.route):
+            state = (index, previous, counts, multi_state)
+            selected: RouteCompletionOption | None = None
+            for option in self._options.get(state, ()):
+                value, next_counts, next_multi_state, completions = option
+                if rank < completions:
+                    selected = option
+                    break
+                rank -= completions
+            if selected is None:  # pragma: no cover - guards the DP invariant
+                raise RuntimeError("route completion counts could not decode rank")
+
+            value, counts, multi_state, completions = selected
+            route.append(value)
+            previous = value
+            completion_trace.append(completions)
+            rank_trace.append(rank)
+            index += 1
+
+        if completion_trace[-1] != 1 or rank_trace[-1] != 0:
+            raise RuntimeError("completed route has an inconsistent rank trace")
+        return RouteSample(
+            route=tuple(route),
+            rank=original_rank,
+            total_completions=total,
+            prefix_completion_counts=tuple(completion_trace),
+            prefix_ranks=tuple(rank_trace),
+        )
+
+    def _consume_node(self) -> None:
+        if self.budget is not None:
+            self.budget.consume(self.node_stage)
+        self._search_nodes += 1
+
+    def _count(
+        self,
+        index: int,
+        previous: int,
+        pile_counts: tuple[int, int, int],
+        multi_state: int,
+    ) -> int:
+        if index == len(self.belief.route):
+            return 1
+        state = (index, previous, pile_counts, multi_state)
+        cached = self._counts.get(state)
+        if cached is not None:
+            return cached
+
+        options: list[RouteCompletionOption] = []
+        total = 0
+        cap = self.belief._edge_cap(index) if index else None
+        for value in self.belief._values_at(index):
+            self._consume_node()
+            if index and (previous >= value or value - previous > cap):
+                continue
+            next_counts = self.belief._add_pile_card(
+                pile_counts,
+                value,
+                index,
+            )
+            next_multi_state = self.belief._advance_multi_state(
+                index,
+                value,
+                multi_state,
+            )
+            if next_counts is None or next_multi_state is None:
+                continue
+            completions = self._count(
+                index + 1,
+                value,
+                next_counts,
+                next_multi_state,
+            )
+            if completions:
+                options.append(
+                    (value, next_counts, next_multi_state, completions)
+                )
+                total += completions
+
+        self._counts[state] = total
+        self._options[state] = tuple(options)
+        return total
+
+
 @lru_cache(maxsize=256)
 def solve_observation_belief(observation: Observation) -> BeliefResult:
     """Cache the deterministic Marshal belief for one immutable observation."""
@@ -825,7 +910,10 @@ def solve_observation_belief(observation: Observation) -> BeliefResult:
 
 __all__ = [
     "BeliefResult",
+    "CompiledRouteCatalogue",
     "PathBelief",
     "RouteSample",
+    "RouteSampler",
+    "RouteSamplingBudget",
     "solve_observation_belief",
 ]

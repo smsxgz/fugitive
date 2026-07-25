@@ -171,11 +171,13 @@ def test_registered_runner_domain_separates_all_random_streams():
     assert len({expected.deck, expected.fugitive, expected.marshal}) == 3
     assert run.status is ExperimentStatus.TRUNCATED
     assert run.manifest.fugitive_agent.parameters == {
+        "algorithm_id": "hr-1-fugitive-hierarchical-legal-random-v1",
         "max_extra_overpayments": 8,
         "max_low_cost_payments": 3,
         "overpay_probability": 0.05,
     }
     assert run.manifest.marshal_agent.parameters == {
+        "algorithm_id": "hr-1-marshal-hard-support-random-v2",
         "max_guess_size": 2,
         "max_guesses_per_size": 128,
         "multi_guess_continuation": 0.1,

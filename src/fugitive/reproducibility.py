@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+from types import MappingProxyType
 from typing import Mapping, TypeAlias, cast
 
 from .model import Role
@@ -20,9 +21,20 @@ from .model import Role
 # this value is a replay-protocol change, not a normal implementation detail.
 SEED_DERIVATION_VERSION = "fugitive-experiment-v1"
 AGENT_PROFILES = ("default", "interactive")
+MIN_SEED = 0
+MAX_SEED = (1 << 64) - 1
 
 JSONValue: TypeAlias = (
     None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+)
+FrozenJSONValue: TypeAlias = (
+    None
+    | bool
+    | int
+    | float
+    | str
+    | tuple["FrozenJSONValue", ...]
+    | Mapping[str, "FrozenJSONValue"]
 )
 
 
@@ -44,9 +56,7 @@ class SeedBundle:
         ):
             if value is None and optional:
                 continue
-            if isinstance(value, bool) or not isinstance(value, int):
-                suffix = " or None" if optional else ""
-                raise TypeError(f"{label} seed must be an integer{suffix}")
+            validate_seed(value, f"{label} seed")  # type: ignore[arg-type]
 
     def to_dict(self) -> dict[str, str | None]:
         return {
@@ -71,12 +81,12 @@ class AgentDescriptor:
     """Legacy manifest identity and constructor parameters for one policy."""
 
     name: str
-    parameters: dict[str, JSONValue]
+    parameters: Mapping[str, FrozenJSONValue]
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
             raise ValueError("agent name must be a non-empty string")
-        object.__setattr__(self, "parameters", normalize_parameters(self.parameters))
+        object.__setattr__(self, "parameters", freeze_parameters(self.parameters))
 
     @classmethod
     def create(
@@ -84,10 +94,13 @@ class AgentDescriptor:
         name: str,
         parameters: Mapping[str, object] | None = None,
     ) -> "AgentDescriptor":
-        return cls(name=name, parameters=cast(dict[str, JSONValue], parameters or {}))
+        return cls(name=name, parameters=parameters or {})
 
     def to_dict(self) -> dict[str, JSONValue]:
-        return {"name": self.name, "parameters": dict(self.parameters)}
+        return {
+            "name": self.name,
+            "parameters": thaw_parameters(self.parameters),
+        }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> "AgentDescriptor":
@@ -107,7 +120,7 @@ class AgentSpec:
     name: str
     role: Role
     profile: str
-    parameters: dict[str, JSONValue]
+    parameters: Mapping[str, FrozenJSONValue]
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name:
@@ -118,14 +131,14 @@ class AgentSpec:
             raise ValueError(
                 f"agent profile must be one of {', '.join(AGENT_PROFILES)}"
             )
-        object.__setattr__(self, "parameters", normalize_parameters(self.parameters))
+        object.__setattr__(self, "parameters", freeze_parameters(self.parameters))
 
     def to_dict(self) -> dict[str, JSONValue]:
         return {
             "name": self.name,
             "role": self.role.value,
             "profile": self.profile,
-            "parameters": dict(self.parameters),
+            "parameters": thaw_parameters(self.parameters),
         }
 
     @classmethod
@@ -144,20 +157,19 @@ class AgentSpec:
             name,
             Role(str(role)),
             profile,
-            cast(dict[str, JSONValue], parameters),
+            cast(Mapping[str, object], parameters),
         )
 
     def descriptor(self) -> AgentDescriptor:
         """Return the schema-v1 replay descriptor for this resolved spec."""
 
-        return AgentDescriptor(self.name, dict(self.parameters))
+        return AgentDescriptor.create(self.name, self.parameters)
 
 
 def derive_seed(master_seed: int, domain: str) -> int:
     """Derive a deterministic 64-bit seed with explicit domain separation."""
 
-    if isinstance(master_seed, bool) or not isinstance(master_seed, int):
-        raise TypeError("master_seed must be an integer")
+    master_seed = validate_seed(master_seed, "master_seed")
     if not isinstance(domain, str) or not domain:
         raise ValueError("domain must be a non-empty string")
     payload = f"{SEED_DERIVATION_VERSION}\0{master_seed}\0{domain}".encode("utf-8")
@@ -186,6 +198,48 @@ def normalize_parameters(parameters: Mapping[str, object]) -> dict[str, JSONValu
     )
 
 
+def freeze_parameters(
+    parameters: Mapping[str, object],
+) -> Mapping[str, FrozenJSONValue]:
+    """Return a detached, recursively immutable JSON mapping."""
+
+    normalized = normalize_parameters(parameters)
+    frozen = _freeze_json_value(normalized)
+    assert isinstance(frozen, Mapping)
+    return frozen
+
+
+def thaw_parameters(
+    parameters: Mapping[str, FrozenJSONValue],
+) -> dict[str, JSONValue]:
+    """Return a mutable JSON copy suitable for serialization."""
+
+    thawed = _thaw_json_value(parameters)
+    assert isinstance(thawed, dict)
+    return thawed
+
+
+def _freeze_json_value(value: JSONValue) -> FrozenJSONValue:
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {key: _freeze_json_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+def _thaw_json_value(value: FrozenJSONValue) -> JSONValue:
+    if isinstance(value, Mapping):
+        return {
+            key: _thaw_json_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return [_thaw_json_value(item) for item in value]
+    return value
+
+
 def json_value(value: object) -> JSONValue:
     """Convert plain JSON-compatible values while rejecting lossy values."""
 
@@ -211,13 +265,34 @@ def seed_to_text(value: int | None) -> str | None:
     return None if value is None else str(value)
 
 
+def validate_seed(value: int, label: str = "seed") -> int:
+    """Validate the shared programmatic seed contract without parsing text."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{label} must be an integer")
+    if not MIN_SEED <= value <= MAX_SEED:
+        raise ValueError(
+            f"{label} must be between {MIN_SEED} and {MAX_SEED}"
+        )
+    return value
+
+
 def parse_seed(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise ValueError(f"{label} seed must be a decimal string")
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise ValueError(f"{label} seed must be a decimal string") from exc
+    if isinstance(value, str):
+        if (
+            not value
+            or len(value) > 20
+            or not value.isascii()
+            or not value.isdecimal()
+            or (len(value) > 1 and value.startswith("0"))
+        ):
+            raise ValueError(f"{label} seed must be a canonical decimal string")
+        parsed = int(value)
+    else:
+        parsed = value
+    return validate_seed(parsed, f"{label} seed")
 
 
 def parse_optional_seed(value: object, label: str) -> int | None:
@@ -228,14 +303,20 @@ __all__ = [
     "AGENT_PROFILES",
     "AgentDescriptor",
     "AgentSpec",
+    "FrozenJSONValue",
     "JSONValue",
+    "MAX_SEED",
+    "MIN_SEED",
     "SEED_DERIVATION_VERSION",
     "SeedBundle",
     "derive_seed",
     "derive_seed_bundle",
+    "freeze_parameters",
     "json_value",
     "normalize_parameters",
     "parse_optional_seed",
     "parse_seed",
     "seed_to_text",
+    "thaw_parameters",
+    "validate_seed",
 ]

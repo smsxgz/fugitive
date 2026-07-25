@@ -9,7 +9,13 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from fugitive.agents.exact_sprint_bir import EXACT_SPRINT_ALGORITHM_ID
 from fugitive.agents.registry import MARSHAL_AGENT_REGISTRY
+from fugitive.inference_diagnostics import (
+    BeliefQualityDiagnostics,
+    BootstrapInferenceWorkDiagnostics,
+    InferenceDiagnosticsSnapshot,
+)
 from fugitive.model import FugitiveAction, Phase, Role
 from fugitive.rules import legal_fugitive_actions
 from fugitive.web import (
@@ -33,6 +39,60 @@ def make_session(mode: str, *, seed: int = 73) -> GameSession:
     )
 
 
+def example_inference_diagnostics() -> InferenceDiagnosticsSnapshot:
+    return InferenceDiagnosticsSnapshot(
+        algorithm_id="test-bootstrap-v1",
+        backend_id="test-backend-v1",
+        operation="incremental_update",
+        quality=BeliefQualityDiagnostics(
+            requested_particles=16,
+            particle_entries=16,
+            unique_worlds=12,
+            entry_ess=15.0,
+            world_ess=10.5,
+            max_world_mass=0.2,
+            unique_hidden_routes=7,
+            hidden_route_ess=5.5,
+            max_hidden_route_mass=0.3,
+            hard_route_support_count=24,
+        ),
+        work=BootstrapInferenceWorkDiagnostics(
+            inference_count=2,
+            cache_hit_count=0,
+            fresh_build_count=1,
+            incremental_update_count=1,
+            support_extinction_reset_count=0,
+            systematic_resampling_count=1,
+            origin_fresh_sampling_proposals=20,
+            origin_fresh_sampling_accepted=16,
+            origin_fresh_sampling_acceptance_rate=0.8,
+            minimum_pre_resample_entry_ess=8.0,
+            origin_fresh_sampling_exhausted=False,
+            cache_size=2,
+        ),
+    )
+
+
+class DiagnosticsMarshal:
+    def choose_draw_pile(self, observation):
+        return observation.legal_draw_piles[0]
+
+    def choose_guess(self, _observation):
+        return (1,)
+
+    def inference_diagnostics(self) -> InferenceDiagnosticsSnapshot:
+        return example_inference_diagnostics()
+
+
+class FailingDiagnosticsMarshal(DiagnosticsMarshal):
+    def __init__(self) -> None:
+        self.diagnostic_calls = 0
+
+    def inference_diagnostics(self) -> InferenceDiagnosticsSnapshot:
+        self.diagnostic_calls += 1
+        raise RuntimeError("diagnostics unavailable")
+
+
 def test_agent_catalog_is_role_specific_and_marks_expensive_agents() -> None:
     catalog = agent_catalog()
 
@@ -47,6 +107,8 @@ def test_agent_catalog_is_role_specific_and_marks_expensive_agents() -> None:
         "belief-informed-random",
         "route-count-random",
         "constructive-belief-informed-random",
+        "unweighted-constructive-belief-informed-random",
+        "exact-sprint-belief-informed-random",
         "mcmc-belief-informed-random",
     }
     fugitive = {item["id"]: item for item in catalog["fugitive"]}
@@ -62,10 +124,16 @@ def test_agent_catalog_is_role_specific_and_marks_expensive_agents() -> None:
         "Route-Count Random (HR-1.1)"
     )
     assert marshal["constructive-belief-informed-random"]["label"] == (
-        "Constructive Belief-Informed Random (BIR-2)"
+        "BIR-2S \u00b7 Constructive SNIS \u00b7 Sequential Sprint"
+    )
+    assert marshal["unweighted-constructive-belief-informed-random"][
+        "label"
+    ] == "BIR-2U · Constructive Unweighted · Sequential Sprint"
+    assert marshal["exact-sprint-belief-informed-random"]["label"] == (
+        "BIR-2E · Constructive SNIS · Exact Sprint DP · very slow"
     )
     assert marshal["mcmc-belief-informed-random"]["label"] == (
-        "MCMC Belief-Informed Random (BIR-3)"
+        "BIR-3 \u00b7 SIR + Independent MH"
     )
     assert all(item["expensive"] is False for item in catalog["fugitive"])
     assert all(item["role"] == "marshal" for item in catalog["marshal"])
@@ -322,6 +390,109 @@ def test_switching_spectator_perspective_is_read_only_and_role_safe() -> None:
     assert tuple(dict(event) for event in session._events) == before_events
 
 
+def test_inference_diagnostics_are_collected_once_and_redacted_by_view() -> None:
+    session = make_session("spectate")
+    session.marshal_player = DiagnosticsMarshal()
+
+    session.step()
+    session.step()
+    omniscient = session.step()
+
+    assert len(session._inference_events) == 1
+    assert len(omniscient["inference_events"]) == 1
+    event = omniscient["inference_events"][0]
+    assert event["decision"] == 3
+    assert event["round_number"] == 1
+    assert event["phase"] == Phase.MARSHAL_DRAW.value
+    assert event["role"] == Role.MARSHAL.value
+    assert event["diagnostics"]["algorithm_id"] == "test-bootstrap-v1"
+    assert event["diagnostics"]["quality"]["unique_hidden_routes"] == 7
+
+    assert session.set_spectator_view("fugitive")["inference_events"] == []
+    assert session.set_spectator_view("public")["inference_events"] == []
+    assert len(session.set_spectator_view("marshal")["inference_events"]) == 1
+    assert len(session.set_spectator_view("omniscient")["inference_events"]) == 1
+    assert len(session._inference_events) == 1
+
+    reset = session.reset(seed=73)
+    assert reset["inference_events"] == []
+    assert session._inference_events == []
+
+
+def test_diagnostics_failure_does_not_repeat_or_undo_web_action() -> None:
+    session = make_session("spectate")
+    failing_marshal = FailingDiagnosticsMarshal()
+    session.marshal_player = failing_marshal
+
+    session.step()
+    session.step()
+    before = session.engine.observation(Role.MARSHAL)
+    state = session.step()
+    after = session.engine.observation(Role.MARSHAL)
+
+    assert failing_marshal.diagnostic_calls == 1
+    assert session._decision_count == 3
+    assert len(session._decision_trace) == 3
+    assert len(after.hand) == len(before.hand) + 1
+    assert sum(after.pile_sizes) == sum(before.pile_sizes) - 1
+    assert state["status"] == "running"
+    assert state["inference_events"] == []
+    assert state["inference_diagnostic_failures"] == [
+        {
+            "decision": 3,
+            "round_number": 1,
+            "phase": Phase.MARSHAL_DRAW.value,
+            "role": Role.MARSHAL.value,
+            "error": {
+                "type": "RuntimeError",
+                "message": "diagnostics unavailable",
+            },
+        }
+    ]
+
+    # Serializing or switching perspective only reads the recorded warning;
+    # neither operation invokes the diagnostics provider again.
+    assert session.as_dict()["inference_diagnostic_failures"]
+    assert session.set_spectator_view("fugitive")[
+        "inference_diagnostic_failures"
+    ] == []
+    assert session.set_spectator_view("public")[
+        "inference_diagnostic_failures"
+    ] == []
+    assert len(
+        session.set_spectator_view("marshal")[
+            "inference_diagnostic_failures"
+        ]
+    ) == 1
+    assert len(
+        session.set_spectator_view("omniscient")[
+            "inference_diagnostic_failures"
+        ]
+    ) == 1
+    assert failing_marshal.diagnostic_calls == 1
+
+    reset = session.reset(seed=73)
+    assert reset["inference_diagnostic_failures"] == []
+    assert session._inference_diagnostic_failures == []
+
+
+def test_human_actions_do_not_collect_agent_diagnostics_or_expose_agent_events() -> None:
+    session = make_session("human_fugitive")
+    session.marshal_player = DiagnosticsMarshal()
+
+    session.apply_human_action(
+        {"type": "fugitive_action", "hideout": 1, "sprint_cards": []}
+    )
+    state = session.apply_human_action(
+        {"type": "fugitive_action", "hideout": 2, "sprint_cards": []}
+    )
+
+    assert session._inference_events
+    assert all(event.role is Role.MARSHAL for event in session._inference_events)
+    assert all(event.decision > 2 for event in session._inference_events)
+    assert state["inference_events"] == []
+
+
 def test_invalid_or_human_spectator_view_switch_is_rejected() -> None:
     spectator = make_session("spectate")
     with pytest.raises(WebAPIError) as invalid:
@@ -390,6 +561,24 @@ def test_http_api_and_static_file_serving(tmp_path: Path) -> None:
         assert status == HTTPStatus.OK
         assert catalog["fugitive"]
         assert catalog["defaults"]["fugitive"] == "belief-informed-random"
+
+        status, exact_game = _request_json(
+            f"{base}/api/games",
+            method="POST",
+            body={
+                "mode": "spectate",
+                "fugitive_agent": "hierarchical-random",
+                "marshal_agent": "exact-sprint-belief-informed-random",
+                "seed": 23,
+            },
+        )
+        assert status == HTTPStatus.CREATED
+        assert exact_game["marshal_agent"] == "exact-sprint-belief-informed-random"
+        exact_parameters = store.get(exact_game["id"])._agent_configurations[
+            Role.MARSHAL.value
+        ]["parameters"]
+        assert exact_parameters["sprint_backend"] == "exact"
+        assert exact_parameters["algorithm_id"] == EXACT_SPRINT_ALGORITHM_ID
 
         status, game = _request_json(
             f"{base}/api/games",

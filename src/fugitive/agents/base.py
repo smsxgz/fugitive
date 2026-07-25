@@ -4,19 +4,14 @@ from __future__ import annotations
 
 from collections import defaultdict
 import random
-from typing import Iterable, Protocol
+from typing import Iterable
 
 from fugitive.model import (
     FugitiveAction,
-    FugitiveAgent,
-    MarshalAgent,
     Observation,
     Phase,
 )
 from fugitive.rules import sprint_value
-
-
-PILE_RANGES: tuple[range, ...] = (range(4, 15), range(15, 29), range(29, 42))
 
 
 def make_rng(
@@ -32,17 +27,6 @@ def make_rng(
     if isinstance(seed, random.Random):
         return seed
     return random.Random(seed)
-
-
-class Agent(FugitiveAgent, MarshalAgent, Protocol):
-    """Compatibility interface for policies that intentionally play both roles.
-
-    Role-specific policies should satisfy :class:`FugitiveAgent` or
-    :class:`MarshalAgent` structurally instead of inheriting this class.  The
-    name remains available for existing dual-role policies and imports.
-    """
-
-    name = "agent"
 
 
 def sprint_subsets_by_value(
@@ -149,37 +133,8 @@ def _has_opening_continuation(
     return False
 
 
-def sensible_guess_numbers(observation: Observation) -> list[int]:
-    """Numbers that can still be an unrevealed Hideout."""
-
-    unavailable = set(observation.hand)
-    for slot in observation.route:
-        if slot.hideout is not None:
-            unavailable.add(slot.hideout)
-        if slot.sprint_cards is not None:
-            unavailable.update(slot.sprint_cards)
-    current_route_length = len(observation.route) - 1
-    unavailable.update(
-        record.numbers[0]
-        for record in observation.guess_history
-        if not record.success
-        and len(record.numbers) == 1
-        and record.route_length == current_route_length
-    )
-    candidates = [number for number in range(1, 42) if number not in unavailable]
-    if candidates:
-        return candidates
-    # Guessing a revealed/impossible number is still rules-legal.  This branch
-    # simply prevents an agent from crashing in a contradictory test fixture.
-    return list(range(1, 42))
-
-
 __all__ = [
-    "Agent",
-    "PILE_RANGES",
     "bounded_fugitive_actions",
     "make_rng",
-    "sensible_guess_numbers",
     "sprint_subsets_by_value",
-    "sprint_value",
 ]

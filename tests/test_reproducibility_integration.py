@@ -8,12 +8,12 @@ from fugitive.experiment import (
     state_sha256,
 )
 from fugitive.reproducibility import (
+    MAX_SEED,
     SEED_DERIVATION_VERSION,
     SeedBundle,
     derive_seed_bundle,
 )
 from fugitive.web import (
-    MAX_SEED,
     GameSession,
     replay_manifest_from_web_trace,
 )
@@ -44,8 +44,8 @@ def test_web_and_experiment_match_with_the_same_master_profile_and_spec() -> Non
         master_seed=MAX_SEED,
         fugitive_name="hierarchical-random",
         marshal_name="hierarchical-random",
-        fugitive_profile="interactive",
-        marshal_profile="interactive",
+        fugitive_profile="default",
+        marshal_profile="default",
     )
     assert experiment.game_result is not None
 

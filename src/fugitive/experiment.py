@@ -21,10 +21,15 @@ from .driver import (
     DrawTrace,
     FugitiveTrace,
     GuessTrace,
-    TraceRecord,
+    DecisionRecord,
     step_agent,
 )
 from .engine import GameEngine
+from .inference_diagnostics import (
+    InferenceDiagnosticFailure,
+    InferenceEvent,
+    read_inference_diagnostics,
+)
 from .model import (
     FugitiveAction,
     FugitiveAgent,
@@ -114,7 +119,7 @@ class ReplayManifest:
     status: ExperimentStatus
     decision_count: int
     max_decisions: int | None
-    trace: tuple[TraceRecord, ...]
+    trace: tuple[DecisionRecord, ...]
     final_state_sha256: str
     winner: Winner | None = None
     reason: str | None = None
@@ -224,6 +229,8 @@ class ExperimentRun:
 
     manifest: ReplayManifest
     game_result: GameResult | None
+    inference_events: tuple[InferenceEvent, ...] = ()
+    inference_diagnostic_failures: tuple[InferenceDiagnosticFailure, ...] = ()
 
     @property
     def status(self) -> ExperimentStatus:
@@ -316,7 +323,9 @@ def run_experiment(
     )
 
     engine = GameEngine(seed=seeds.deck)
-    trace: list[TraceRecord] = []
+    trace: list[DecisionRecord] = []
+    inference_events: list[InferenceEvent] = []
+    inference_diagnostic_failures: list[InferenceDiagnosticFailure] = []
     error: RunError | None = None
     status: ExperimentStatus | None = None
 
@@ -335,14 +344,41 @@ def run_experiment(
         phase = engine.phase
         stage = "step_agent"
         try:
-            trace.append(
-                step_agent(
-                    engine,
-                    fugitive_agent,
-                    marshal_agent,
-                    decision=decision,
-                )
+            record = step_agent(
+                engine,
+                fugitive_agent,
+                marshal_agent,
+                decision=decision,
             )
+            trace.append(record)
+            stage = "collect_inference_diagnostics"
+            acting_agent = (
+                fugitive_agent
+                if record.role is Role.FUGITIVE
+                else marshal_agent
+            )
+            try:
+                diagnostics = read_inference_diagnostics(acting_agent)
+                if diagnostics is not None:
+                    inference_events.append(
+                        InferenceEvent(
+                            decision=record.decision,
+                            round_number=record.round_number,
+                            phase=record.phase,
+                            role=record.role,
+                            diagnostics=diagnostics,
+                        )
+                    )
+            except Exception as diagnostics_error:
+                inference_diagnostic_failures.append(
+                    InferenceDiagnosticFailure.from_exception(
+                        decision=record.decision,
+                        round_number=record.round_number,
+                        phase=record.phase,
+                        role=record.role,
+                        error=diagnostics_error,
+                    )
+                )
             if validate_invariants:
                 stage = "validate_invariants"
                 engine.validate_invariants()
@@ -374,7 +410,12 @@ def run_experiment(
         game_result=game_result,
         error=error,
     )
-    return ExperimentRun(manifest, game_result)
+    return ExperimentRun(
+        manifest,
+        game_result,
+        tuple(inference_events),
+        tuple(inference_diagnostic_failures),
+    )
 
 
 def replay_manifest(
@@ -559,7 +600,7 @@ def _build_manifest(
     fugitive_descriptor: AgentDescriptor,
     marshal_descriptor: AgentDescriptor,
     status: ExperimentStatus,
-    trace: tuple[TraceRecord, ...],
+    trace: tuple[DecisionRecord, ...],
     max_decisions: int | None,
     game_result: GameResult | None,
     error: RunError | None,
@@ -633,7 +674,7 @@ def _jsonable(value: object) -> JSONValue:
     raise ValueError(f"unsupported JSON value: {type(value).__name__}")
 
 
-def _trace_to_dict(record: TraceRecord) -> dict[str, JSONValue]:
+def _trace_to_dict(record: DecisionRecord) -> dict[str, JSONValue]:
     base: dict[str, JSONValue] = {
         "decision": record.decision,
         "round": record.round_number,
@@ -661,7 +702,7 @@ def _trace_to_dict(record: TraceRecord) -> dict[str, JSONValue]:
     return base
 
 
-def _trace_from_dict(data: Mapping[str, object]) -> TraceRecord:
+def _trace_from_dict(data: Mapping[str, object]) -> DecisionRecord:
     decision = _require_int(data.get("decision"), "trace decision")
     round_number = _require_int(data.get("round"), "trace round")
     phase = Phase(str(data.get("phase")))

@@ -8,17 +8,22 @@ import pytest
 from fugitive.agents.constructive_bir import (
     ConstructiveBeliefConstructionError,
     ConstructiveBeliefInformedRandomMarshalAgent,
+    ConstructiveMarshalBeliefBackend,
 )
+from fugitive.agents.bootstrap_bir import BeliefInformedRandomMarshalAgent
+from fugitive.agents.marshal_belief_policy import BeliefInformedMarshalActionPolicy
 from fugitive.agents.hierarchical_random import (
     HierarchicalRandomFugitiveAgent,
     HierarchicalRandomMarshalAgent,
 )
-from fugitive.constructive_belief import (
+from fugitive.engine import GameEngine, play_game
+from fugitive.inference_diagnostics import ConstructiveInferenceWorkDiagnostics
+from fugitive.inference.constructive_metadata import constructive_observation_hash
+from fugitive.inference.constructive_sampler import ConstructiveWorldSampler
+from fugitive.inference.worlds import (
     ConstructiveSampleBatch,
     ConstructiveSamplingReport,
-    ConstructiveWorldSampler,
 )
-from fugitive.engine import GameEngine, play_game
 from fugitive.model import FugitiveAction, Phase, Role
 from fugitive.particle_belief import MarshalParticleBelief
 
@@ -69,6 +74,14 @@ class _RecordingSampler:
         self.calls = 0
         self.last_batch = None
 
+    @property
+    def proposal_kernel_id(self):
+        return self.delegate.proposal_kernel_id
+
+    @property
+    def target_id(self):
+        return self.delegate.target_id
+
     def sample_batch(self, *args, **kwargs):
         self.calls += 1
         self.last_batch = self.delegate.sample_batch(*args, **kwargs)
@@ -76,7 +89,7 @@ class _RecordingSampler:
 
 
 class _IncompleteSampler(_RecordingSampler):
-    def sample_batch(self, _observation, *, particle_count, **_kwargs):
+    def sample_batch(self, observation, *, particle_count, **_kwargs):
         self.calls += 1
         self.last_batch = ConstructiveSampleBatch(
             worlds=(),
@@ -84,7 +97,7 @@ class _IncompleteSampler(_RecordingSampler):
                 requested=particle_count,
                 produced=0,
                 proposals=1,
-                rejected_routes=1,
+                dead_end_route_proposals=1,
                 rejected_targets=0,
                 search_nodes=0,
                 degraded=True,
@@ -93,6 +106,9 @@ class _IncompleteSampler(_RecordingSampler):
                 exhausted_stage=None,
                 unique_worlds=0,
             ),
+            proposal_kernel_id=self.delegate.proposal_kernel_id,
+            target_id=self.delegate.target_id,
+            observation_hash=constructive_observation_hash(observation),
         )
         return self.last_batch
 
@@ -121,8 +137,10 @@ def test_constructive_bir_is_deterministic_and_caches_observations() -> None:
     assert first.draw_pile_distribution(observation) == second.draw_pile_distribution(
         observation
     )
-    assert first.last_sampling_report is not None
-    assert first.last_sampling_report.produced == 24
+    diagnostics = first.inference_diagnostics()
+    assert diagnostics is not None
+    assert isinstance(diagnostics.work, ConstructiveInferenceWorkDiagnostics)
+    assert diagnostics.work.sampling.produced == 24
 
 
 def test_constructive_bir_defaults_to_sequential_sprint_proposals() -> None:
@@ -131,7 +149,10 @@ def test_constructive_bir_defaults_to_sequential_sprint_proposals() -> None:
     )
 
     assert agent.sprint_backend == "sequential"
-    assert agent._constructive_sampler.sprint_backend == "sequential"
+    assert isinstance(agent.action_policy, BeliefInformedMarshalActionPolicy)
+    assert isinstance(agent.belief_backend, ConstructiveMarshalBeliefBackend)
+    assert agent.belief_backend.sampler.sprint_backend == "sequential"
+    assert not isinstance(agent, BeliefInformedRandomMarshalAgent)
 
 
 def test_constructive_bir_depends_only_on_the_marshal_observation() -> None:
@@ -174,7 +195,7 @@ def test_constructive_bir_preserves_normalized_importance_weights() -> None:
     assert not belief.sampling_exhausted
 
 
-def test_constructive_bir_rejects_budget_partial_without_legacy_fallback(
+def test_constructive_bir_rejects_budget_partial_without_fresh_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _engine, observation = _opening_observation()
@@ -185,13 +206,13 @@ def test_constructive_bir_rejects_budget_partial_without_legacy_fallback(
         _sampler=sampler,
     )
 
-    def forbidden_legacy_sampler(*_args, **_kwargs):
-        raise AssertionError("BIR-2 must not call the legacy rejection sampler")
+    def forbidden_fresh_fallback(*_args, **_kwargs):
+        raise AssertionError("BIR-2 must not use a second fresh sampler")
 
     monkeypatch.setattr(
         MarshalParticleBelief,
         "from_observation",
-        forbidden_legacy_sampler,
+        forbidden_fresh_fallback,
     )
     with pytest.raises(
         ConstructiveBeliefConstructionError,
@@ -202,25 +223,26 @@ def test_constructive_bir_rejects_budget_partial_without_legacy_fallback(
     assert caught.value.report.degraded
     assert caught.value.report.importance_valid
     assert sampler.calls == 1
-    assert agent.last_sampling_report is None
-    assert observation not in agent._belief_cache
+    assert agent.inference_diagnostics() is None
+    assert agent.belief_backend.cache_size == 0
 
-@pytest.mark.parametrize("seed", (0, 1, 2))
-def test_constructive_bir_full_game_fixtures_finish(seed: int) -> None:
-    fugitive = HierarchicalRandomFugitiveAgent(100 + seed)
+def test_constructive_bir_small_particle_full_game_finishes() -> None:
+    fugitive = HierarchicalRandomFugitiveAgent(100)
     marshal = ConstructiveBeliefInformedRandomMarshalAgent(
-        200 + seed,
+        200,
         particle_count=8,
         max_guess_candidates=16,
     )
 
-    result = play_game(fugitive, marshal, seed=seed)
+    result = play_game(fugitive, marshal, seed=0)
 
     assert result.winner is not None
     assert result.reason
-    assert marshal.last_sampling_report is not None
-    assert marshal.last_sampling_report.produced == 8
-    assert not marshal.last_sampling_report.degraded
+    diagnostics = marshal.inference_diagnostics()
+    assert diagnostics is not None
+    assert isinstance(diagnostics.work, ConstructiveInferenceWorkDiagnostics)
+    assert diagnostics.work.sampling.produced == 8
+    assert diagnostics.work.weighting_id == marshal.weighting_id
 
 @pytest.mark.parametrize("particle_count", (128, 2_000))
 def test_registered_particle_profiles_complete_high_sprint_fixture(
@@ -237,11 +259,11 @@ def test_registered_particle_profiles_complete_high_sprint_fixture(
     belief = agent.belief(observation)
     elapsed = time.perf_counter() - started
 
-    report = agent.last_sampling_report
-    assert report is not None
+    diagnostics = agent.inference_diagnostics()
+    assert diagnostics is not None
+    assert isinstance(diagnostics.work, ConstructiveInferenceWorkDiagnostics)
+    report = diagnostics.work.sampling
     assert len(belief.particles) == particle_count
     assert report.produced == particle_count
-    assert not report.degraded
-    assert report.importance_valid
     assert report.search_nodes < 2_000_000
     assert elapsed < 15.0

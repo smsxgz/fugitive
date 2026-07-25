@@ -4,7 +4,7 @@ from collections import defaultdict
 
 import pytest
 
-from fugitive.agents.belief_informed_random import (
+from fugitive.agents.bootstrap_bir import (
     BeliefInformedRandomMarshalAgent,
 )
 from fugitive.agents.baseline_utils import epsilon_softmax
@@ -15,6 +15,30 @@ from fugitive.agents.hierarchical_random import (
 from fugitive.engine import GameEngine
 from fugitive.model import Observation, Phase, Role
 from fugitive.particle_belief import MarshalParticleBelief
+
+
+def _reference_best_guess_score(
+    agent: BeliefInformedRandomMarshalAgent,
+    observation: Observation,
+    belief: MarshalParticleBelief,
+) -> float:
+    """Score a draw outcome through an explicitly conditioned belief."""
+
+    candidates = agent.candidate_guess_sets(observation, belief)
+    if not candidates or belief.is_empty:
+        return 0.0
+    failure_cost = agent.action_policy._escape_risk_after_draw(belief)
+    hidden_count = agent.action_policy._hidden_count(observation)
+    return max(
+        agent.action_policy._guess_score(
+            observation,
+            belief,
+            guess,
+            failure_cost=failure_cost,
+            hidden_count=hidden_count,
+        )
+        for guess in candidates
+    )
 
 
 def _reference_draw_pile_distribution(
@@ -37,7 +61,8 @@ def _reference_draw_pile_distribution(
             continue
         scores[pile] = sum(
             probability
-            * agent._best_guess_score(
+            * _reference_best_guess_score(
+                agent,
                 observation,
                 belief.conditioned_on_marshal_draw(pile, card),
             )
@@ -151,7 +176,7 @@ def test_draw_outcome_statistics_match_conditioned_beliefs() -> None:
                 route_masses,
                 abs=1e-12,
             )
-            assert agent._candidate_guess_sets_from_masses(
+            assert agent.action_policy._candidate_guess_sets_from_masses(
                 outcome.marginals,
                 outcome.hidden_route_masses,
             ) == agent.candidate_guess_sets(observation, conditioned)
@@ -163,7 +188,7 @@ def test_draw_outcome_statistics_match_conditioned_beliefs() -> None:
                     abs=1e-12,
                 )
             assert outcome.escape_risk == pytest.approx(
-                agent._escape_risk_after_draw(conditioned),
+                agent.action_policy._escape_risk_after_draw(conditioned),
                 abs=1e-12,
             )
 

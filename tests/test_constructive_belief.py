@@ -14,26 +14,27 @@ from fugitive.agents.hierarchical_random import (
     HierarchicalRandomFugitiveAgent,
     HierarchicalRandomMarshalAgent,
 )
-from fugitive.constructive_belief import (
-    CARD_TO_PILE,
-    INITIAL_FUGITIVE_CARDS,
+from fugitive.inference.constraints import (
     CompiledMarshalConstraints,
-    ConstraintUniformTarget,
-    ConstructiveWorldSampler,
-    DrawDeadlineMatcher,
     DrawSlot,
-    PathBeliefRouteSampler,
-    SamplingBudget,
+)
+from fugitive.inference.constructive_metadata import constructive_observation_hash
+from fugitive.inference.constructive_sampler import ConstructiveWorldSampler
+from fugitive.inference.draw_matching import DrawDeadlineMatcher
+from fugitive.inference.sampling import SamplingBudget, SamplingCounter
+from fugitive.inference.sprint_exact import SprintAssignmentDP
+from fugitive.inference.sprint_sequential import (
     SequentialSprintAssignmentProposal,
-    SprintAssignmentDP,
-    _BudgetCounter,
-    _INITIAL_SOURCE,
-    _SPRINT_CATEGORY_INDEX,
+)
+from fugitive.inference.worlds import (
+    ConstraintUniformTarget,
+    ConstructiveSamplingReport,
 )
 from fugitive.engine import GameEngine
 from fugitive.model import FugitiveAction, Phase, Role, RouteView
-from fugitive.particle_belief import _particle_matches_observation
+from fugitive.particle_belief import particle_matches_public_projection
 from fugitive.rules import PILE_CARDS, sprint_value
+from fugitive.world_validation import CARD_TO_PILE, INITIAL_FUGITIVE_CARDS
 
 
 def _opening_observation(
@@ -48,12 +49,26 @@ def _opening_observation(
     return engine, engine.observation(Role.MARSHAL)
 
 
-def _revealed_numbers(observation) -> frozenset[int]:
-    return frozenset(
-        slot.hideout
-        for index, slot in enumerate(observation.route)
-        if index and slot.revealed and slot.hideout is not None
+def test_exact_and_sequential_sprint_algorithms_are_peer_implementations() -> None:
+    assert not issubclass(SequentialSprintAssignmentProposal, SprintAssignmentDP)
+
+
+def test_sampling_report_uses_precise_dead_end_route_name() -> None:
+    report = ConstructiveSamplingReport(
+        requested=4,
+        produced=2,
+        proposals=5,
+        dead_end_route_proposals=3,
+        rejected_targets=0,
+        search_nodes=10,
+        degraded=True,
+        importance_valid=True,
+        termination_reason="max_proposals",
+        exhausted_stage=None,
+        unique_worlds=2,
     )
+
+    assert report.dead_end_route_proposals == 3
 
 
 def test_route_sampler_count_and_raw_proposal_match_bruteforce() -> None:
@@ -70,8 +85,8 @@ def test_route_sampler_count_and_raw_proposal_match_bruteforce() -> None:
         if 0 < first < second and first <= 3 and second - first <= 3
     )
     belief = PathBelief(route, candidate_cards=candidates)
-    counter = _BudgetCounter(SamplingBudget(max_nodes=10_000))
-    sampler = PathBeliefRouteSampler(belief, counter)
+    counter = SamplingCounter(SamplingBudget(max_nodes=10_000))
+    sampler = belief.compile_route_catalogue(counter)
 
     assert sampler.total_paths == len(expected)
     observed = Counter()
@@ -79,7 +94,7 @@ def test_route_sampler_count_and_raw_proposal_match_bruteforce() -> None:
         sample = sampler.sample(random.Random(seed))
         assert sample is not None
         assert sample.route in expected
-        assert sample.total_paths == len(expected)
+        assert sample.total_completions == len(expected)
         assert sample.log_q == pytest.approx(-math.log(len(expected)))
         observed[sample.route] += 1
 
@@ -92,7 +107,7 @@ def test_route_sampler_count_and_raw_proposal_match_bruteforce() -> None:
     )
 
 
-def test_route_adapter_matches_constrained_path_belief_count() -> None:
+def test_public_route_catalogue_matches_constrained_path_belief_count() -> None:
     engine, _observation = _opening_observation(
         FugitiveAction(1), FugitiveAction(3), seed=5
     )
@@ -104,9 +119,8 @@ def test_route_adapter_matches_constrained_path_belief_count() -> None:
     engine.draw(2)
     observation = engine.observation(Role.MARSHAL)
     constraints = CompiledMarshalConstraints.from_observation(observation)
-    sampler = PathBeliefRouteSampler(
-        constraints.path_belief,
-        _BudgetCounter(SamplingBudget(max_nodes=50_000)),
+    sampler = constraints.path_belief.compile_route_catalogue(
+        SamplingCounter(SamplingBudget(max_nodes=50_000))
     )
 
     assert sampler.total_paths == constraints.path_belief.total_paths
@@ -115,7 +129,7 @@ def test_route_adapter_matches_constrained_path_belief_count() -> None:
 def test_draw_deadline_matcher_count_and_q_match_enumeration() -> None:
     cards = ((4, 5, 6, 7), (), ())
     slots = (DrawSlot(0, 0, 0), DrawSlot(1, 0, 2))
-    counter = _BudgetCounter(SamplingBudget(max_nodes=100))
+    counter = SamplingCounter(SamplingBudget(max_nodes=100))
     matcher = DrawDeadlineMatcher(slots, (7,), pile_cards=cards, budget=counter)
     deadlines = {4: 0}
     available = (4, 5, 6)
@@ -141,6 +155,34 @@ def test_draw_deadline_matcher_count_and_q_match_enumeration() -> None:
     assert observed == set(brute)
 
 
+def test_draw_deadline_matcher_uses_custom_pile_membership() -> None:
+    matcher = DrawDeadlineMatcher(
+        (DrawSlot(0, 0, 0),),
+        (),
+        pile_cards=((15, 16), (), ()),
+    )
+
+    assert matcher.count({15: 0}) == 1
+    assignment = matcher.sample({15: 0}, random.Random(8))
+    assert assignment is not None
+    assert assignment.fugitive_draws == (15,)
+    assert assignment.remaining_piles == ((16,), (), ())
+    assert assignment.log_q == 0.0
+
+
+@pytest.mark.parametrize(
+    "pile_cards",
+    (
+        ((4,), (15,)),
+        ((4,), (4,), ()),
+        ((0,), (), ()),
+    ),
+)
+def test_draw_deadline_matcher_validates_custom_piles(pile_cards) -> None:
+    with pytest.raises(ValueError, match="pile_cards"):
+        DrawDeadlineMatcher((), (), pile_cards=pile_cards)  # type: ignore[arg-type]
+
+
 def test_sprint_assignment_counts_every_identity_and_draw_completion() -> None:
     engine, _observation = _opening_observation(
         FugitiveAction(1), FugitiveAction(6, (2,)), seed=1
@@ -150,7 +192,7 @@ def test_sprint_assignment_counts_every_identity_and_draw_completion() -> None:
     assert engine.apply_guess((1,))
     observation = engine.observation(Role.MARSHAL)
     constraints = CompiledMarshalConstraints.from_observation(observation)
-    counter = _BudgetCounter(SamplingBudget(max_nodes=500_000))
+    counter = SamplingCounter(SamplingBudget(max_nodes=500_000))
     matcher = DrawDeadlineMatcher.from_constraints(constraints, counter)
     route = (0, 1, 6)
     assignment = SprintAssignmentDP(constraints, route, matcher, counter)
@@ -198,7 +240,7 @@ def test_category_dp_matches_two_stack_identity_bruteforce() -> None:
         ),
     )
     synthetic = replace(constraints, observation=synthetic_observation)
-    counter = _BudgetCounter(SamplingBudget(max_nodes=200_000))
+    counter = SamplingCounter(SamplingBudget(max_nodes=200_000))
     matcher = DrawDeadlineMatcher.from_constraints(synthetic, counter)
     route = (0, 2, 7)
     assignment = SprintAssignmentDP(synthetic, route, matcher, counter)
@@ -236,14 +278,14 @@ def test_sequential_proposal_normalizes_support_and_log_q_by_bruteforce() -> Non
         ),
     )
     synthetic = replace(constraints, observation=synthetic_observation)
-    counter = _BudgetCounter(SamplingBudget(max_nodes=50_000))
+    counter = SamplingCounter(SamplingBudget(max_nodes=50_000))
     matcher = DrawDeadlineMatcher.from_constraints(synthetic, counter)
     proposal = SequentialSprintAssignmentProposal(
         synthetic, (0, 4, 5), matcher, counter
     )
 
-    branches = proposal._allocation_branches(
-        0, proposal._initial_group_counts, proposal._fixed_demands
+    branches = proposal.allocation_branches(
+        0, proposal.model.initial_group_counts, proposal.model.fixed_demands
     )
     branch_by_allocation = {branch.allocation: branch for branch in branches}
     total_weight = sum(branch.proposal_weight for branch in branches)
@@ -251,12 +293,12 @@ def test_sequential_proposal_normalizes_support_and_log_q_by_bruteforce() -> Non
     probability_mass = 0.0
     deadline = synthetic.creation_rounds[1]
 
-    for category, cards in enumerate(proposal._initial_group_cards):
+    for category, cards in enumerate(proposal.model.initial_group_cards):
         for card in cards:
-            allocation = [0] * len(proposal._initial_group_counts)
+            allocation = [0] * len(proposal.model.initial_group_counts)
             allocation[category] = 1
             allocation_key = tuple(allocation)
-            exact_deadlines = dict(proposal._fixed_deadlines)
+            exact_deadlines = dict(proposal.model.fixed_deadlines)
             if card in CARD_TO_PILE:
                 exact_deadlines[card] = deadline
             if not matcher.count(exact_deadlines):
@@ -282,16 +324,15 @@ def test_sequential_proposal_normalizes_support_and_log_q_by_bruteforce() -> Non
     assert sample is not None
     assert sample.completion_count is None
     selected_card = sample.route_sprints[1][0]
-    source = (
-        _INITIAL_SOURCE
-        if selected_card in INITIAL_FUGITIVE_CARDS
-        else CARD_TO_PILE[selected_card]
+    category = next(
+        index
+        for index, cards in enumerate(proposal.model.initial_group_cards)
+        if selected_card in cards
     )
-    category = _SPRINT_CATEGORY_INDEX[(source, sprint_value(selected_card))]
-    allocation = [0] * len(proposal._initial_group_counts)
+    allocation = [0] * len(proposal.model.initial_group_counts)
     allocation[category] = 1
     selected_branch = branch_by_allocation[tuple(allocation)]
-    exact_deadlines = dict(proposal._fixed_deadlines)
+    exact_deadlines = dict(proposal.model.fixed_deadlines)
     if selected_card in CARD_TO_PILE:
         exact_deadlines[selected_card] = deadline
     draw_count = matcher.count(exact_deadlines)
@@ -319,7 +360,7 @@ def test_sequential_two_stack_support_q_and_late_rejection_are_explicit() -> Non
         creation_rounds=(0, 1, 1),
         marshal_hand=tuple(card for card in range(4, 42) if card not in (5, 7)),
     )
-    counter = _BudgetCounter(SamplingBudget(max_nodes=20_000))
+    counter = SamplingCounter(SamplingBudget(max_nodes=20_000))
     matcher = DrawDeadlineMatcher(
         synthetic.draw_slots,
         synthetic.marshal_hand,
@@ -390,16 +431,16 @@ def test_sprint_categories_represent_more_than_512_identity_sets() -> None:
         creation_rounds=(0, 1),
         marshal_hand=(),
     )
-    counter = _BudgetCounter(SamplingBudget(max_nodes=2_000))
+    counter = SamplingCounter(SamplingBudget(max_nodes=2_000))
     matcher = DrawDeadlineMatcher.from_constraints(synthetic, counter)
     assignment = SprintAssignmentDP(synthetic, (0, 4), matcher, counter)
 
-    allocations = assignment._category_allocations(
-        0, assignment._initial_group_counts
+    allocations = assignment.model.category_allocations(
+        0, assignment.model.initial_group_counts
     )
     identity_sets = sum(
-        assignment._branch_multiplicity(
-            assignment._initial_group_counts, allocation
+        assignment.model.branch_multiplicity(
+            assignment.model.initial_group_counts, allocation
         )
         for allocation in allocations
     )
@@ -422,12 +463,9 @@ def test_constructive_worlds_match_observation_cards_and_deadlines() -> None:
     assert batch.report.produced == 64
     assert len(batch.normalized_weights) == 64
     assert sum(batch.normalized_weights) == pytest.approx(1.0)
-    revealed = _revealed_numbers(observation)
     for world in batch.worlds:
         assert world.all_cards_are_unique
-        assert _particle_matches_observation(
-            world.to_particle(), observation, revealed_numbers=revealed
-        )
+        assert particle_matches_public_projection(world.to_particle(), observation)
         hidden = {
             hideout
             for index, hideout in enumerate(world.route_hideouts)
@@ -472,12 +510,9 @@ def test_constructive_worlds_handle_an_unknown_sprint_stack() -> None:
     )
 
     assert not batch.report.degraded
-    revealed = _revealed_numbers(observation)
     assert all(
         len(world.route_sprints[2]) == 1
-        and _particle_matches_observation(
-            world.to_particle(), observation, revealed_numbers=revealed
-        )
+        and particle_matches_public_projection(world.to_particle(), observation)
         for world in batch.worlds
     )
 
@@ -532,13 +567,10 @@ def test_sequential_worlds_are_reproducible_and_observation_consistent() -> None
     assert not first.report.degraded
     assert first.report.importance_valid
     assert sum(first.normalized_weights) == pytest.approx(1.0)
-    revealed = _revealed_numbers(observation)
     assert all(
         world.all_cards_are_unique
         and math.isfinite(world.log_q)
-        and _particle_matches_observation(
-            world.to_particle(), observation, revealed_numbers=revealed
-        )
+        and particle_matches_public_projection(world.to_particle(), observation)
         for world in first.worlds
     )
 
@@ -595,6 +627,36 @@ def test_unbounded_node_budget_still_counts_search_work() -> None:
     assert batch.report.produced == 8
     assert batch.report.search_nodes > 0
     assert batch.report.importance_valid
+    assert batch.report.termination_reason is None
+
+
+def test_unbounded_proposal_budget_has_no_hidden_particle_multiple_cap() -> None:
+    class DelayedTarget(ConstraintUniformTarget):
+        target_id = "test-delayed-constraint-uniform-target-v1"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def log_density(self, world, constraints) -> float:
+            self.calls += 1
+            if self.calls <= 256:
+                return -math.inf
+            return super().log_density(world, constraints)
+
+    _engine, observation = _opening_observation()
+    target = DelayedTarget()
+    batch = ConstructiveWorldSampler(
+        target=target,
+        sprint_backend="sequential",
+    ).sample_batch(
+        observation,
+        particle_count=1,
+        seed=17,
+        budget=SamplingBudget(max_nodes=None, max_proposals=None),
+    )
+
+    assert batch.report.produced == 1
+    assert batch.report.proposals > 256
     assert batch.report.termination_reason is None
 
 
@@ -670,10 +732,8 @@ def test_review_three_by_three_sprint_fixture_fits_two_million_nodes() -> None:
     assert batch.report.importance_valid
     assert batch.report.search_nodes < 2_000_000
     assert elapsed < 5.0
-    assert _particle_matches_observation(
-        batch.worlds[0].to_particle(),
-        observation,
-        revealed_numbers=_revealed_numbers(observation),
+    assert particle_matches_public_projection(
+        batch.worlds[0].to_particle(), observation
     )
 
 
@@ -703,9 +763,50 @@ def test_constructive_sampler_validates_sprint_backend() -> None:
         ConstructiveWorldSampler(sprint_backend="unknown")
 
 
+def test_custom_sampler_components_require_explicit_stable_ids() -> None:
+    def custom_route_factory(_constraints, _budget):
+        raise AssertionError("constructor test must not invoke the route sampler")
+
+    with pytest.raises(ValueError, match="route_proposal_id"):
+        ConstructiveWorldSampler(  # type: ignore[arg-type]
+            route_sampler_factory=custom_route_factory
+        )
+    sampler = ConstructiveWorldSampler(  # type: ignore[arg-type]
+        route_sampler_factory=custom_route_factory,
+        route_proposal_id="test-route-proposal-v1",
+    )
+    assert "route=test-route-proposal-v1" in sampler.proposal_kernel_id
+
+    class UnidentifiedTarget(ConstraintUniformTarget):
+        pass
+
+    with pytest.raises(ValueError, match="override target_id"):
+        ConstructiveWorldSampler(target=UnidentifiedTarget())
+
+
 def test_constraint_uniform_target_is_explicitly_policy_agnostic() -> None:
     target = ConstraintUniformTarget()
     assert target.name == "constraint-uniform-complete-worlds-v1"
+    assert target.target_id == target.name
+
+
+def test_constructive_batch_records_stable_inference_fingerprint() -> None:
+    _engine, observation = _opening_observation()
+    first_sampler = ConstructiveWorldSampler(sprint_backend="sequential")
+    repeated_sampler = ConstructiveWorldSampler(sprint_backend="sequential")
+    exact_sampler = ConstructiveWorldSampler(sprint_backend="exact")
+    first = first_sampler.sample_batch(observation, particle_count=1, seed=3)
+    repeated = repeated_sampler.sample_batch(
+        observation, particle_count=1, seed=4
+    )
+
+    assert first.proposal_kernel_id == first_sampler.proposal_kernel_id
+    assert first.proposal_kernel_id == repeated.proposal_kernel_id
+    assert first.proposal_kernel_id != exact_sampler.proposal_kernel_id
+    assert first.target_id == first_sampler.target_id
+    assert first.target_id == ConstraintUniformTarget.target_id
+    assert first.observation_hash == constructive_observation_hash(observation)
+    assert first.observation_hash == repeated.observation_hash
 
 
 def test_constraint_uniform_target_rejects_worlds_outside_public_support() -> None:
@@ -768,6 +869,8 @@ def test_target_rejects_route_that_contradicts_failed_guess_history() -> None:
 
 def test_target_zero_proposals_are_rejected_before_weight_normalization() -> None:
     class RejectAllTarget(ConstraintUniformTarget):
+        target_id = "test-reject-all-target-v1"
+
         def log_density(self, world, constraints) -> float:
             return -math.inf
 

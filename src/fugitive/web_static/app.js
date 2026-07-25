@@ -20,6 +20,11 @@ const MODE_LABELS = {
   spectate: "观战",
 };
 
+const EXECUTION_PROFILE_LABELS = {
+  full: "Full · default",
+  quick: "Quick demo · interactive",
+};
+
 const ROLE_LABELS = {
   fugitive: "Fugitive",
   marshal: "Marshal",
@@ -92,12 +97,25 @@ const elements = {
   terminateButton: document.querySelector("#terminateButton"),
   speedSelect: document.querySelector("#speedSelect"),
   modeValue: document.querySelector("#modeValue"),
+  profileValue: document.querySelector("#profileValue"),
   fugitiveValue: document.querySelector("#fugitiveValue"),
+  fugitiveParameters: document.querySelector("#fugitiveParameters"),
   marshalValue: document.querySelector("#marshalValue"),
+  marshalParameters: document.querySelector("#marshalParameters"),
   viewerValue: document.querySelector("#viewerValue"),
   seedValue: document.querySelector("#seedValue"),
   copySeedButton: document.querySelector("#copySeedButton"),
   exportTraceButton: document.querySelector("#exportTraceButton"),
+  inferencePanel: document.querySelector("#inferencePanel"),
+  inferenceDecision: document.querySelector("#inferenceDecision"),
+  inferenceAlgorithm: document.querySelector("#inferenceAlgorithm"),
+  inferenceBackend: document.querySelector("#inferenceBackend"),
+  inferenceOperation: document.querySelector("#inferenceOperation"),
+  inferencePopulation: document.querySelector("#inferencePopulation"),
+  inferenceWorlds: document.querySelector("#inferenceWorlds"),
+  inferenceRoutes: document.querySelector("#inferenceRoutes"),
+  inferenceSupport: document.querySelector("#inferenceSupport"),
+  inferenceWork: document.querySelector("#inferenceWork"),
   logCount: document.querySelector("#logCount"),
   gameLog: document.querySelector("#gameLog"),
   toast: document.querySelector("#toast"),
@@ -128,6 +146,10 @@ class APIError extends Error {
 
 function getMode() {
   return new FormData(elements.setupForm).get("mode") || "human_fugitive";
+}
+
+function getExecutionProfile() {
+  return new FormData(elements.setupForm).get("execution_profile") || "full";
 }
 
 function setConnection(kind, label) {
@@ -287,6 +309,7 @@ async function startGame(event) {
 
   const body = {
     mode: getMode(),
+    execution_profile: getExecutionProfile(),
     fugitive_agent: elements.fugitiveAgent.value,
     marshal_agent: elements.marshalAgent.value,
   };
@@ -415,6 +438,7 @@ function renderGame() {
   renderHand();
   renderActions();
   renderSession();
+  renderInference();
   renderHistory();
   renderSpectatorControls();
 }
@@ -934,10 +958,14 @@ function renderGuessGrid() {
 function renderSession() {
   const game = app.game;
   elements.modeValue.textContent = MODE_LABELS[game.mode] || String(game.mode || "—");
+  elements.profileValue.textContent =
+    EXECUTION_PROFILE_LABELS[game.execution_profile] || String(game.execution_profile || "—");
   elements.fugitiveValue.textContent =
     game.mode === "human_fugitive" ? "你 · Human" : String(game.fugitive_agent || "—");
   elements.marshalValue.textContent =
     game.mode === "human_marshal" ? "你 · Human" : String(game.marshal_agent || "—");
+  renderAgentParameters("fugitive", elements.fugitiveParameters);
+  renderAgentParameters("marshal", elements.marshalParameters);
   elements.viewerValue.textContent =
     game.mode === "spectate"
       ? SPECTATOR_VIEW_LABELS[game.spectator_view] || "观战"
@@ -954,6 +982,126 @@ function renderSession() {
   elements.copySeedButton.disabled = app.busy || !exactSeedVisible;
   elements.exportTraceButton.hidden = !game.can_export;
   elements.exportTraceButton.disabled = app.busy || !game.can_export;
+}
+
+function renderAgentParameters(role, target) {
+  const humanRole = app.game?.mode === "human_fugitive"
+    ? "fugitive"
+    : app.game?.mode === "human_marshal"
+      ? "marshal"
+      : null;
+  const configuration = app.game?.agents?.[role];
+  const parameters = configuration?.parameters;
+  const keys = ["particle_count", "max_guess_candidates", "mh_steps_per_chain"];
+  const values = role !== humanRole && parameters && typeof parameters === "object"
+    ? keys
+      .filter((key) => Object.prototype.hasOwnProperty.call(parameters, key))
+      .map((key) => `${key}=${parameters[key]}`)
+    : [];
+  target.textContent = values.join(" · ");
+  target.hidden = values.length === 0;
+}
+
+function formatDiagnosticNumber(value, digits = 1) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "—";
+  }
+  if (Number.isInteger(value)) {
+    return String(value);
+  }
+  return value.toFixed(digits).replace(/\.0+$/, "");
+}
+
+function formatDiagnosticPercent(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "—";
+  }
+  return `${(100 * value).toFixed(1).replace(/\.0$/, "")}%`;
+}
+
+function formatSamplingWork(sampling, { includeImportance = true } = {}) {
+  if (!sampling || typeof sampling !== "object") {
+    return "—";
+  }
+  const parts = [
+    `proposals ${formatDiagnosticNumber(sampling.proposals, 0)}`,
+    `nodes ${formatDiagnosticNumber(sampling.search_nodes, 0)}`,
+  ];
+  if (includeImportance && typeof sampling.proposal_importance_ess === "number") {
+    parts.push(`SNIS ESS ${formatDiagnosticNumber(sampling.proposal_importance_ess)}`);
+  }
+  return parts.join(" · ");
+}
+
+function formatInferenceWork(work) {
+  if (!work || typeof work !== "object") {
+    return "—";
+  }
+  if (work.kind === "bootstrap") {
+    return [
+      `reset ${formatDiagnosticNumber(work.support_extinction_reset_count, 0)}`,
+      `resample ${formatDiagnosticNumber(work.systematic_resampling_count, 0)}`,
+      `origin accepted ${formatDiagnosticNumber(work.origin_fresh_sampling_accepted, 0)}/${formatDiagnosticNumber(work.origin_fresh_sampling_proposals, 0)}`,
+      `pre-ESS min ${formatDiagnosticNumber(work.minimum_pre_resample_entry_ess)}`,
+    ].join(" · ");
+  }
+  if (work.kind === "constructive") {
+    return [
+      String(work.weighting_id || "—"),
+      formatSamplingWork(work.sampling),
+    ].join(" · ");
+  }
+  if (work.kind === "sir_independent_mh") {
+    return [
+      `initial ${String(work.initial_weighting_id || "—")} · ${formatSamplingWork(work.initial_sampling)}`,
+      `MH-q ${formatSamplingWork(work.mh_proposal_sampling, { includeImportance: false })}`,
+      `accept ${formatDiagnosticNumber(work.accepted, 0)}/${formatDiagnosticNumber(work.mh_proposals, 0)} (${formatDiagnosticPercent(work.acceptance_rate)})`,
+      `change ${formatDiagnosticNumber(work.changed, 0)} (${formatDiagnosticPercent(work.change_rate)})`,
+    ].join(" · ");
+  }
+  return String(work.kind || "—");
+}
+
+function renderInference() {
+  const events = Array.isArray(app.game?.inference_events)
+    ? app.game.inference_events
+    : [];
+  const event = events.at(-1);
+  const diagnostics = event?.diagnostics;
+  const quality = diagnostics?.quality;
+  const visible = Boolean(event && diagnostics && quality);
+  elements.inferencePanel.hidden = !visible;
+  if (!visible) {
+    return;
+  }
+
+  elements.inferenceDecision.textContent = [
+    `#${event.decision}`,
+    `R${event.round_number}`,
+    ROLE_LABELS[event.role] || event.role,
+  ].join(" · ");
+  elements.inferenceAlgorithm.textContent = String(diagnostics.algorithm_id || "—");
+  elements.inferenceBackend.textContent = String(diagnostics.backend_id || "—");
+  elements.inferenceOperation.textContent = String(diagnostics.operation || "—");
+  elements.inferencePopulation.textContent = [
+    `${formatDiagnosticNumber(quality.particle_entries, 0)}/${formatDiagnosticNumber(quality.requested_particles, 0)} entries`,
+    `ESS ${formatDiagnosticNumber(quality.entry_ess)}`,
+  ].join(" · ");
+  elements.inferenceWorlds.textContent = [
+    `${formatDiagnosticNumber(quality.unique_worlds, 0)} unique`,
+    `ESS ${formatDiagnosticNumber(quality.world_ess)}`,
+    `max ${formatDiagnosticPercent(quality.max_world_mass)}`,
+  ].join(" · ");
+  elements.inferenceRoutes.textContent = [
+    `${formatDiagnosticNumber(quality.unique_hidden_routes, 0)} unique`,
+    `ESS ${formatDiagnosticNumber(quality.hidden_route_ess)}`,
+    `max ${formatDiagnosticPercent(quality.max_hidden_route_mass)}`,
+  ].join(" · ");
+  elements.inferenceSupport.textContent = formatDiagnosticNumber(
+    quality.hard_route_support_count,
+    0,
+  );
+  elements.inferenceWork.textContent = formatInferenceWork(diagnostics.work);
 }
 
 async function copyExactSeed() {
