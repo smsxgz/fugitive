@@ -39,7 +39,7 @@ from .marshal_belief_policy import (
     DEFAULT_MAX_GUESS_CANDIDATES,
     BeliefInformedMarshalActionPolicy,
     ComposedBeliefInformedRandomMarshalAgent,
-    _marshal_rng_and_belief_salt,
+    marshal_rng_and_belief_salt,
 )
 
 
@@ -238,7 +238,7 @@ class BeliefInformedRandomMarshalAgent(
         manhunt_epsilon: float = DEFAULT_MANHUNT_EPSILON,
         manhunt_alpha: float = DEFAULT_MANHUNT_ALPHA,
     ) -> None:
-        policy_rng, belief_salt = _marshal_rng_and_belief_salt(seed, rng)
+        policy_rng, belief_salt = marshal_rng_and_belief_salt(seed, rng)
         backend = BootstrapParticleBeliefBackend(
             particle_count=particle_count,
             belief_salt=belief_salt,

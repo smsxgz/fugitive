@@ -87,6 +87,117 @@ class GameEngine:
             self._setup_draw(Role.FUGITIVE, 1)
         self._sort_hands()
 
+    @classmethod
+    def from_determinized_state(
+        cls,
+        *,
+        piles: Iterable[Iterable[int]],
+        fugitive_hand: Iterable[int],
+        marshal_hand: Iterable[int],
+        route: Iterable[tuple[int, Iterable[int], bool]],
+        phase: Phase,
+        round_number: int,
+        history: Iterable[HistoryRecord],
+    ) -> "GameEngine":
+        """Build a non-terminal engine from one complete hidden world.
+
+        This is a simulation-harness API, not information supplied to an
+        agent. ``piles`` must contain the exact future draw order used by the
+        engine (the next card is the last item). Higher-level determinization
+        code is responsible for sampling that order from its information set.
+        """
+
+        if not isinstance(phase, Phase) or phase is Phase.TERMINAL:
+            raise ValueError("a determinized root must have a non-terminal phase")
+        if (
+            isinstance(round_number, bool)
+            or not isinstance(round_number, int)
+            or round_number < 1
+        ):
+            raise ValueError("round_number must be a positive integer")
+
+        route_nodes = [
+            _RouteNode(
+                hideout,
+                tuple(sorted(sprint_cards)),
+                revealed=bool(revealed),
+            )
+            for hideout, sprint_cards, revealed in route
+        ]
+        records = list(history)
+        if any(
+            not isinstance(record, (DrawRecord, PlayRecord, GuessRecord))
+            for record in records
+        ):
+            raise TypeError("history contains an unsupported record")
+
+        opening_plays_remaining = (
+            3 - len(route_nodes) if phase is Phase.FUGITIVE_OPENING else 0
+        )
+        if phase is Phase.FUGITIVE_DRAW:
+            draws_remaining = 1
+        elif phase is Phase.MARSHAL_DRAW:
+            required_draws = 2 if round_number == 1 else 1
+            completed_draws = sum(
+                isinstance(record, DrawRecord)
+                and record.role is Role.MARSHAL
+                and record.round_number == round_number
+                for record in records
+            )
+            draws_remaining = required_draws - completed_draws
+        else:
+            draws_remaining = 0
+
+        engine = cls.__new__(cls)
+        engine._state = _GameState(
+            piles=[list(pile) for pile in piles],
+            hands={
+                Role.FUGITIVE: sorted(fugitive_hand),
+                Role.MARSHAL: sorted(marshal_hand),
+            },
+            route=route_nodes,
+            phase=phase,
+            round_number=round_number,
+            opening_plays_remaining=opening_plays_remaining,
+            draws_remaining=draws_remaining,
+            history=records,
+            guess_history=[
+                record for record in records if isinstance(record, GuessRecord)
+            ],
+            draw_history=[
+                record for record in records if isinstance(record, DrawRecord)
+            ],
+        )
+        try:
+            engine.validate_invariants()
+        except AssertionError as exc:
+            raise ValueError("determinized state violates engine invariants") from exc
+        return engine
+
+    def clone(self) -> "GameEngine":
+        """Return an independent engine with the same complete game state."""
+
+        state = self._state
+        engine = self.__class__.__new__(self.__class__)
+        engine._state = _GameState(
+            piles=[list(pile) for pile in state.piles],
+            hands={role: list(hand) for role, hand in state.hands.items()},
+            route=[
+                _RouteNode(node.hideout, node.sprint_cards, node.revealed)
+                for node in state.route
+            ],
+            phase=state.phase,
+            round_number=state.round_number,
+            opening_plays_remaining=state.opening_plays_remaining,
+            draws_remaining=state.draws_remaining,
+            winner=state.winner,
+            reason=state.reason,
+            history=list(state.history),
+            guess_history=list(state.guess_history),
+            draw_history=list(state.draw_history),
+        )
+        return engine
+
     @property
     def phase(self) -> Phase:
         return self._state.phase

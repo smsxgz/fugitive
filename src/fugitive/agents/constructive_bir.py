@@ -1,4 +1,4 @@
-"""BIR-2 Marshal backed by constructive, importance-weighted worlds.
+"""BIR-2S Marshal backed by constructive, importance-weighted worlds.
 
 The action scoring and stochastic choice hierarchy are supplied by the shared
 belief-informed action-policy component.  Belief construction is an injected
@@ -51,12 +51,12 @@ from .marshal_belief_policy import (
     DEFAULT_MAX_GUESS_CANDIDATES,
     BeliefInformedMarshalActionPolicy,
     ComposedBeliefInformedRandomMarshalAgent,
-    _marshal_rng_and_belief_salt,
+    marshal_rng_and_belief_salt,
 )
 
 
 CONSTRUCTIVE_SPRINT_BACKEND = SEQUENTIAL_CONSTRUCTIVE_SPRINT_BACKEND
-BIR2_ALGORITHM_ID = "bir-2s-constructive-snis-v1"
+BIR2S_ALGORITHM_ID = "bir-2s-constructive-snis-v1"
 BIR2_REFERENCE_TARGET_ID = ConstraintUniformTarget.target_id
 BIR2_PROPOSAL_KERNEL_ID = constructive_proposal_kernel_id(
     CONSTRUCTIVE_SPRINT_BACKEND
@@ -69,12 +69,12 @@ UNWEIGHTED_ACCEPTED_PROPOSALS_ID = (
 
 
 class ConstructiveBeliefConstructionError(RuntimeError):
-    """Raised when BIR-2 cannot construct its complete particle batch."""
+    """Raised when BIR-2S cannot construct its complete particle batch."""
 
     def __init__(self, report: ConstructiveSamplingReport) -> None:
         self.report = report
         super().__init__(
-            "BIR-2 requires a complete importance-valid constructive belief; "
+            "BIR-2S requires a complete importance-valid constructive belief; "
             f"requested={report.requested}, produced={report.produced}, "
             f"degraded={report.degraded}, "
             f"importance_valid={report.importance_valid}, "
@@ -229,7 +229,7 @@ def make_sequential_constructive_policy(
 ) -> BeliefInformedMarshalActionPolicy:
     """Wire the one shared proposal and action policy used by BIR-2S/2U."""
 
-    policy_rng, belief_salt = _marshal_rng_and_belief_salt(seed, rng)
+    policy_rng, belief_salt = marshal_rng_and_belief_salt(seed, rng)
     resolved_sampler = sampler or ConstructiveWorldSampler(
         sprint_backend=CONSTRUCTIVE_SPRINT_BACKEND
     )
@@ -301,14 +301,14 @@ class ConstructiveBeliefInformedRandomMarshalAgent(
         )
         super().__init__(policy)
         self.sprint_backend = CONSTRUCTIVE_SPRINT_BACKEND
-        self.algorithm_id = BIR2_ALGORITHM_ID
+        self.algorithm_id = BIR2S_ALGORITHM_ID
         self.proposal_kernel_id = BIR2_PROPOSAL_KERNEL_ID
         self.belief_seed_domain = BIR2_BELIEF_SEED_DOMAIN
         self.reference_target_id = BIR2_REFERENCE_TARGET_ID
         self.weighting_id = BIR2_WEIGHTING_ID
 
 __all__ = [
-    "BIR2_ALGORITHM_ID",
+    "BIR2S_ALGORITHM_ID",
     "BIR2_BELIEF_SEED_DOMAIN",
     "BIR2_PROPOSAL_KERNEL_ID",
     "BIR2_REFERENCE_TARGET_ID",

@@ -31,7 +31,8 @@ from .model import Winner
 from .reproducibility import AGENT_PROFILES, derive_seed, parse_seed, validate_seed
 
 
-TOURNAMENT_SCHEMA_VERSION = 1
+TOURNAMENT_SCHEMA_VERSION = 2
+TOURNAMENT_DIAGNOSTICS_SCHEMA_VERSION = 1
 TOURNAMENT_GAME_SEED_DOMAIN = "fugitive.tournament.game.v1"
 _WILSON_Z_95 = 1.959963984540054
 
@@ -103,12 +104,24 @@ class TournamentConfig:
                 "game_seed_domain": TOURNAMENT_GAME_SEED_DOMAIN,
             },
             "agents": {
-                "fugitive": list(self.fugitive_agents),
-                "marshal": list(self.marshal_agents),
-            },
-            "profiles": {
-                "fugitive": self.fugitive_profile,
-                "marshal": self.marshal_profile,
+                "fugitive": {
+                    "names": list(self.fugitive_agents),
+                    "resolved_specs": [
+                        FUGITIVE_AGENT_REGISTRY[name]
+                        .build(0, profile=self.fugitive_profile)
+                        .spec.to_dict()
+                        for name in self.fugitive_agents
+                    ],
+                },
+                "marshal": {
+                    "names": list(self.marshal_agents),
+                    "resolved_specs": [
+                        MARSHAL_AGENT_REGISTRY[name]
+                        .build(0, profile=self.marshal_profile)
+                        .spec.to_dict()
+                        for name in self.marshal_agents
+                    ],
+                },
             },
             "max_decisions": self.max_decisions,
             "validate_invariants": self.validate_invariants,
@@ -146,6 +159,8 @@ class GameRecord:
     wall_seconds: float
     inference_events: int
     inference_diagnostic_failures: int
+    rollout_events: int
+    rollout_diagnostic_failures: int
     manifest_path: str
     diagnostics_path: str
 
@@ -170,6 +185,8 @@ class GameRecord:
             "diagnostics": {
                 "events": self.inference_events,
                 "failures": self.inference_diagnostic_failures,
+                "rollout_events": self.rollout_events,
+                "rollout_failures": self.rollout_diagnostic_failures,
                 "path": self.diagnostics_path,
             },
             "manifest_path": self.manifest_path,
@@ -198,6 +215,13 @@ class GameRecord:
             inference_diagnostic_failures=_integer(
                 diagnostics.get("failures"), "diagnostic failures"
             ),
+            rollout_events=_integer(
+                diagnostics.get("rollout_events", 0), "rollout diagnostic events"
+            ),
+            rollout_diagnostic_failures=_integer(
+                diagnostics.get("rollout_failures", 0),
+                "rollout diagnostic failures",
+            ),
             manifest_path=_string(data.get("manifest_path"), "manifest_path"),
             diagnostics_path=_string(diagnostics.get("path"), "diagnostics path"),
         )
@@ -223,6 +247,8 @@ class MatchupSummary:
     total_wall_seconds: float
     inference_events: int
     inference_diagnostic_failures: int
+    rollout_events: int
+    rollout_diagnostic_failures: int
     reasons: Mapping[str, int]
 
     def to_dict(self) -> dict[str, object]:
@@ -247,6 +273,8 @@ class MatchupSummary:
             "total_wall_seconds": self.total_wall_seconds,
             "inference_events": self.inference_events,
             "inference_diagnostic_failures": self.inference_diagnostic_failures,
+            "rollout_events": self.rollout_events,
+            "rollout_diagnostic_failures": self.rollout_diagnostic_failures,
             "reasons": dict(sorted(self.reasons.items())),
         }
 
@@ -424,6 +452,10 @@ def summarize_tournament(
                     inference_events=sum(record.inference_events for record in cell),
                     inference_diagnostic_failures=sum(
                         record.inference_diagnostic_failures for record in cell
+                    ),
+                    rollout_events=sum(record.rollout_events for record in cell),
+                    rollout_diagnostic_failures=sum(
+                        record.rollout_diagnostic_failures for record in cell
                     ),
                     reasons=Counter(
                         record.reason
@@ -630,8 +662,39 @@ def _validate_existing_records(
             raise ValueError(f"record has the wrong paired seed: {record.key}")
         if not (output / record.manifest_path).is_file():
             raise ValueError(f"record manifest is missing: {record.manifest_path}")
-        if not (output / record.diagnostics_path).is_file():
+        diagnostics_path = output / record.diagnostics_path
+        if not diagnostics_path.is_file():
             raise ValueError(f"record diagnostics are missing: {record.diagnostics_path}")
+        try:
+            diagnostics = json.loads(
+                diagnostics_path.read_text(encoding="utf-8")
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"record diagnostics are invalid: {record.diagnostics_path}"
+            ) from exc
+        if not isinstance(diagnostics, Mapping):
+            raise ValueError("record diagnostics must contain an object")
+        if diagnostics.get("schema_version") != (
+            TOURNAMENT_DIAGNOSTICS_SCHEMA_VERSION
+        ):
+            raise ValueError("record diagnostics use an unsupported schema")
+        if diagnostics.get("configuration_hash") != config.configuration_hash:
+            raise ValueError("record diagnostics have the wrong configuration")
+        if diagnostics.get("game_key") != record.key:
+            raise ValueError("record diagnostics have the wrong game key")
+        diagnostic_counts = {
+            "events": record.inference_events,
+            "failures": record.inference_diagnostic_failures,
+            "rollout_events": record.rollout_events,
+            "rollout_failures": record.rollout_diagnostic_failures,
+        }
+        for field, expected_count in diagnostic_counts.items():
+            entries = diagnostics.get(field)
+            if not isinstance(entries, list) or len(entries) != expected_count:
+                raise ValueError(
+                    f"record diagnostics {field} count does not match its index"
+                )
 
 
 def _store_run(
@@ -645,6 +708,7 @@ def _store_run(
     wall_seconds: float,
 ) -> GameRecord:
     cell = f"{fugitive_name}__vs__{marshal_name}"
+    key = tournament_game_key(fugitive_name, marshal_name, game_index)
     manifest_relative = Path("manifests") / cell / f"{game_index:06d}.json"
     diagnostics_relative = Path("diagnostics") / cell / f"{game_index:06d}.json"
     _write_text_atomic(
@@ -652,9 +716,16 @@ def _store_run(
         run.manifest.to_json() + "\n",
     )
     diagnostics = {
+        "schema_version": TOURNAMENT_DIAGNOSTICS_SCHEMA_VERSION,
+        "configuration_hash": config.configuration_hash,
+        "game_key": key,
         "events": [event.to_dict() for event in run.inference_events],
         "failures": [
             failure.to_dict() for failure in run.inference_diagnostic_failures
+        ],
+        "rollout_events": [event.to_dict() for event in run.rollout_events],
+        "rollout_failures": [
+            failure.to_dict() for failure in run.rollout_diagnostic_failures
         ],
     }
     _write_text_atomic(
@@ -664,7 +735,7 @@ def _store_run(
     manifest = run.manifest
     return GameRecord(
         configuration_hash=config.configuration_hash,
-        key=tournament_game_key(fugitive_name, marshal_name, game_index),
+        key=key,
         game_index=game_index,
         fugitive_agent=fugitive_name,
         marshal_agent=marshal_name,
@@ -677,6 +748,8 @@ def _store_run(
         wall_seconds=wall_seconds,
         inference_events=len(run.inference_events),
         inference_diagnostic_failures=len(run.inference_diagnostic_failures),
+        rollout_events=len(run.rollout_events),
+        rollout_diagnostic_failures=len(run.rollout_diagnostic_failures),
         manifest_path=manifest_relative.as_posix(),
         diagnostics_path=diagnostics_relative.as_posix(),
     )
@@ -715,6 +788,8 @@ def _write_csv(path: Path, matchups: Iterable[MatchupSummary]) -> None:
         "total_wall_seconds",
         "inference_events",
         "inference_diagnostic_failures",
+        "rollout_events",
+        "rollout_diagnostic_failures",
         "reasons_json",
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -881,6 +956,7 @@ __all__ = [
     "GameRecord",
     "MatchupSummary",
     "TOURNAMENT_GAME_SEED_DOMAIN",
+    "TOURNAMENT_DIAGNOSTICS_SCHEMA_VERSION",
     "TOURNAMENT_SCHEMA_VERSION",
     "TournamentConfig",
     "TournamentReport",

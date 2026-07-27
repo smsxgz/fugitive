@@ -52,7 +52,7 @@ DEFAULT_MANHUNT_ROLLOUTS = 32
 BIR1_FUGITIVE_ALGORITHM_ID = "bir-1-fugitive-information-set-random-v1"
 
 
-def _clamp01(value: float) -> float:
+def clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
@@ -325,7 +325,7 @@ class BeliefInformedRandomFugitiveAgent:
         cost_scale = 2.75 * max(1, len(observation.hand) - 2)
         return (
             2.0 * plan.second.hideout / 42.0
-            - _clamp01((first_cost + second_cost) / cost_scale)
+            - clamp01((first_cost + second_cost) / cost_scale)
             + 0.5 * self._mobility(remaining, plan.second.hideout)
         )
 
@@ -425,8 +425,8 @@ class BeliefInformedRandomFugitiveAgent:
         remaining = self._spend(observation.hand, action)
         terminal = self._terminal_value(observation, action)
         return (
-            2.0 * _clamp01(progress)
-            - _clamp01(cost / cost_scale)
+            2.0 * clamp01(progress)
+            - clamp01(cost / cost_scale)
             + 0.6 * self._mobility(remaining, action.hideout)
             + 4.0 * terminal
         )
@@ -581,7 +581,7 @@ class BeliefInformedRandomFugitiveAgent:
                     current,
                     truth[guess],
                 )
-        return _clamp01(1.0 - caught / self.manhunt_rollouts)
+        return clamp01(1.0 - caught / self.manhunt_rollouts)
 
     def _shadow_manhunt_number_distribution(
         self,
@@ -644,7 +644,7 @@ class BeliefInformedRandomFugitiveAgent:
         result = self._shadow_result(self._marshal_shadow(observation))
         if not result.total_paths:
             return 1.0 / max(2, 3 * len(hidden))
-        return _clamp01(
+        return clamp01(
             result.count_paths_containing(hidden) / result.total_paths
         )
 
@@ -734,7 +734,7 @@ class BeliefInformedRandomFugitiveAgent:
             return 0.0
         count_score = len(feasible) / len(candidates)
         reach_score = (max(feasible) - previous) / max(1, 42 - previous)
-        return _clamp01(0.5 * count_score + 0.5 * reach_score)
+        return clamp01(0.5 * count_score + 0.5 * reach_score)
 
     @staticmethod
     def _spend(hand: Iterable[int], action: FugitiveAction) -> tuple[int, ...]:
@@ -746,5 +746,5 @@ __all__ = [
     "BIR1_FUGITIVE_ALGORITHM_ID",
     "BeliefInformedRandomFugitiveAgent",
     "DEFAULT_MANHUNT_ROLLOUTS",
+    "clamp01",
 ]
-

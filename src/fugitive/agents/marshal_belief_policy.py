@@ -369,7 +369,7 @@ class BeliefInformedMarshalActionPolicy:
         }
 
 
-def _marshal_rng_and_belief_salt(
+def marshal_rng_and_belief_salt(
     seed: int | random.Random | None,
     rng: random.Random | None,
 ) -> tuple[random.Random, str]:
@@ -463,4 +463,5 @@ __all__ = [
     "ComposedBeliefInformedRandomMarshalAgent",
     "DEFAULT_MAX_GUESS_CANDIDATES",
     "MarshalBeliefBackend",
+    "marshal_rng_and_belief_salt",
 ]

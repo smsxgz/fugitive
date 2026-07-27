@@ -51,7 +51,17 @@ def _fake_run(
         manifest=_FakeManifest(status=status, winner=winner),
         inference_events=(),
         inference_diagnostic_failures=(),
+        rollout_events=(),
+        rollout_diagnostic_failures=(),
     )
+
+
+class _DiagnosticRecord:
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+    def to_dict(self) -> dict[str, str]:
+        return {"kind": self.kind}
 
 
 def _config(tmp_path, *, games: int, root_seed: int = 17) -> TournamentConfig:
@@ -115,6 +125,87 @@ def test_matrix_reuses_one_master_seed_per_game_index(monkeypatch, tmp_path) -> 
         assert (output / filename).is_file()
 
 
+def test_tournament_persists_rollout_diagnostics_and_counts(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    def fake_registered_experiment(**_kwargs):
+        run = _fake_run()
+        run.rollout_events = (
+            _DiagnosticRecord("rollout-event-1"),
+            _DiagnosticRecord("rollout-event-2"),
+        )
+        run.rollout_diagnostic_failures = (
+            _DiagnosticRecord("rollout-failure"),
+        )
+        return run
+
+    monkeypatch.setattr(
+        tournament_module,
+        "run_registered_experiment",
+        fake_registered_experiment,
+    )
+    config = _config(tmp_path, games=1)
+
+    report = run_tournament(config)
+
+    record = report.records[0]
+    matchup = report.matchups[0]
+    assert record.rollout_events == matchup.rollout_events == 2
+    assert record.rollout_diagnostic_failures == (
+        matchup.rollout_diagnostic_failures
+    ) == 1
+    stored = json.loads(
+        (config.output_directory / record.diagnostics_path).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert stored["schema_version"] == (
+        tournament_module.TOURNAMENT_DIAGNOSTICS_SCHEMA_VERSION
+    )
+    assert stored["configuration_hash"] == config.configuration_hash
+    assert stored["game_key"] == record.key
+    assert stored["rollout_events"] == [
+        {"kind": "rollout-event-1"},
+        {"kind": "rollout-event-2"},
+    ]
+    assert stored["rollout_failures"] == [
+        {"kind": "rollout-failure"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    (
+        ("schema_version", 999, "unsupported schema"),
+        ("configuration_hash", "wrong-configuration", "wrong configuration"),
+        ("game_key", "wrong-game", "wrong game key"),
+    ),
+)
+def test_resume_rejects_mismatched_diagnostics_sidecar_metadata(
+    monkeypatch,
+    tmp_path,
+    field,
+    replacement,
+    message,
+) -> None:
+    monkeypatch.setattr(
+        tournament_module,
+        "run_registered_experiment",
+        lambda **_kwargs: _fake_run(),
+    )
+    config = _config(tmp_path, games=1)
+    report = run_tournament(config)
+    record = report.records[0]
+    diagnostics_path = config.output_directory / record.diagnostics_path
+    stored = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    stored[field] = replacement
+    diagnostics_path.write_text(json.dumps(stored), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        run_tournament(config, resume=True)
+
+
 def test_resume_can_extend_the_game_target_without_repeating_work(
     monkeypatch,
     tmp_path,
@@ -149,6 +240,29 @@ def test_resume_can_extend_the_game_target_without_repeating_work(
 
     with pytest.raises(ValueError, match="stay unchanged or increase"):
         run_tournament(_config(tmp_path, games=2), resume=True)
+
+
+def test_tournament_identity_contains_resolved_agent_specs(tmp_path) -> None:
+    config = _config(tmp_path, games=1)
+    agents = config.identity_dict()["agents"]
+    fugitive = agents["fugitive"]
+    marshal = agents["marshal"]
+
+    assert fugitive["names"] == list(config.fugitive_agents)
+    assert marshal["names"] == list(config.marshal_agents)
+    assert [spec["name"] for spec in fugitive["resolved_specs"]] == list(
+        config.fugitive_agents
+    )
+    assert [spec["name"] for spec in marshal["resolved_specs"]] == list(
+        config.marshal_agents
+    )
+    assert all(
+        "algorithm_id" in spec["parameters"]
+        for spec in (
+            *fugitive["resolved_specs"],
+            *marshal["resolved_specs"],
+        )
+    )
 
 
 def test_resume_rejects_a_different_experiment_identity(monkeypatch, tmp_path) -> None:

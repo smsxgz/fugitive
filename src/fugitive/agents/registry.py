@@ -35,6 +35,15 @@ from .bir_fugitive import (
     BeliefInformedRandomFugitiveAgent,
     DEFAULT_MANHUNT_ROLLOUTS,
 )
+from .belief_rollout_fugitive import (
+    BELIEF_ROLLOUT_FUGITIVE_ALGORITHM_ID,
+    DEFAULT_MAX_TERMINAL_SIMULATIONS as DEFAULT_FUGITIVE_ROLLOUT_BUDGET,
+    DEFAULT_ROLLOUT_CANDIDATE_COUNT as DEFAULT_FUGITIVE_ROLLOUT_CANDIDATES,
+    DEFAULT_ROLLOUT_EPSILON as DEFAULT_FUGITIVE_ROLLOUT_EPSILON,
+    DEFAULT_ROLLOUT_TEMPERATURE as DEFAULT_FUGITIVE_ROLLOUT_TEMPERATURE,
+    ROLLOUT_MODEL_ID as FUGITIVE_ROLLOUT_MODEL_ID,
+    BeliefRolloutFugitiveAgent,
+)
 from .bootstrap_bir import (
     BIR1_BOOTSTRAP_BACKEND_ID,
     BIR1_BELIEF_SEED_DOMAIN,
@@ -50,13 +59,27 @@ from .marshal_belief_policy import (
     DEFAULT_MAX_GUESS_CANDIDATES,
 )
 from .constructive_bir import (
-    BIR2_ALGORITHM_ID,
+    BIR2S_ALGORITHM_ID,
     BIR2_BELIEF_SEED_DOMAIN,
     BIR2_PROPOSAL_KERNEL_ID,
     BIR2_REFERENCE_TARGET_ID,
     BIR2_WEIGHTING_ID,
     CONSTRUCTIVE_SPRINT_BACKEND,
     ConstructiveBeliefInformedRandomMarshalAgent,
+)
+from .continuation_count_fugitive import (
+    CATCH_RISK_FEATURE_ID,
+    CONCEALMENT_FEATURE_ID,
+    CONTINUATION_CACHE_ID,
+    CONTINUATION_COUNT_FUGITIVE_ALGORITHM_ID,
+    CONTINUATION_MASS_ID,
+    CONTINUATION_TRANSFORM_ID,
+    DEFAULT_CATCH_RISK_WEIGHT,
+    DEFAULT_CONCEALMENT_WEIGHT,
+    DEFAULT_CONTINUATION_DEPTH,
+    DEFAULT_CONTINUATION_WEIGHT,
+    ContinuationCountFugitiveAgent,
+    PUBLIC_TIMELINE_ID,
 )
 from .exact_sprint_bir import (
     DEFAULT_EXACT_SPRINT_PARTICLE_COUNT,
@@ -99,6 +122,32 @@ from .route_count_random import (
     HR11_MARSHAL_ALGORITHM_ID,
     RouteCountRandomMarshalAgent,
 )
+from .rollout_bir2u_marshal import (
+    DEFAULT_MAX_TERMINAL_SIMULATIONS as DEFAULT_MARSHAL_ROLLOUT_BUDGET,
+    DEFAULT_ROLLOUT_CANDIDATE_COUNT as DEFAULT_MARSHAL_ROLLOUT_CANDIDATES,
+    DEFAULT_ROLLOUT_EPSILON as DEFAULT_MARSHAL_ROLLOUT_EPSILON,
+    DEFAULT_ROLLOUT_TEMPERATURE as DEFAULT_MARSHAL_ROLLOUT_TEMPERATURE,
+    ROLLOUT_MODEL_ID as MARSHAL_ROLLOUT_MODEL_ID,
+    ROLLOUT_BIR2U_MARSHAL_ALGORITHM_ID,
+    RolloutBIR2UMarshalAgent,
+)
+from .catalogue_random_common import (
+    DEFAULT_CATALOGUE_EPSILON,
+    DEFAULT_CATALOGUE_MULTI_GUESS_CONTINUATION,
+)
+from .marshal_candidates import (
+    CATALOGUE_SEED_DOMAIN,
+    DEFAULT_CATALOGUE_MAX_GUESS_SIZE,
+    DEFAULT_CATALOGUE_MAX_JOINT_CANDIDATES,
+)
+from .route_count_catalogue_random import (
+    CONTROLLED_ROUTE_COUNT_ALGORITHM_ID,
+    RouteCountCatalogueRandomMarshalAgent,
+)
+from .support_catalogue_random import (
+    CONTROLLED_SUPPORT_ALGORITHM_ID,
+    SupportCatalogueRandomMarshalAgent,
+)
 from .unweighted_constructive_bir import (
     BIR2U_ALGORITHM_ID,
     BIR2U_BELIEF_SEED_DOMAIN,
@@ -123,6 +172,10 @@ INTERACTIVE_BIR2E_MAX_GUESS_CANDIDATES = 32
 INTERACTIVE_MCMC_BIR_PARTICLE_COUNT = 256
 INTERACTIVE_MCMC_BIR_MAX_GUESS_CANDIDATES = 128
 INTERACTIVE_MCMC_BIR_STEPS_PER_CHAIN = 1
+INTERACTIVE_ROLLOUT_PARTICLE_COUNT = 64
+INTERACTIVE_ROLLOUT_MAX_GUESS_CANDIDATES = 24
+INTERACTIVE_ROLLOUT_TERMINAL_SIMULATIONS = 12
+INTERACTIVE_ROLLOUT_CANDIDATE_COUNT = 3
 
 
 # These tables are intentionally explicit.  They are the teaching/replay
@@ -140,6 +193,21 @@ _BIR_FUGITIVE_DEFAULTS = {
     "manhunt_epsilon": DEFAULT_MANHUNT_EPSILON,
     "manhunt_alpha": DEFAULT_MANHUNT_ALPHA,
     "manhunt_rollouts": DEFAULT_MANHUNT_ROLLOUTS,
+}
+_CONTINUATION_FUGITIVE_DEFAULTS = {
+    **_BIR_FUGITIVE_DEFAULTS,
+    "continuation_weight": DEFAULT_CONTINUATION_WEIGHT,
+    "concealment_weight": DEFAULT_CONCEALMENT_WEIGHT,
+    "catch_risk_weight": DEFAULT_CATCH_RISK_WEIGHT,
+    "continuation_depth": DEFAULT_CONTINUATION_DEPTH,
+}
+_ROLLOUT_FUGITIVE_DEFAULTS = {
+    **_CONTINUATION_FUGITIVE_DEFAULTS,
+    "rollout_candidate_count": DEFAULT_FUGITIVE_ROLLOUT_CANDIDATES,
+    "max_terminal_simulations": DEFAULT_FUGITIVE_ROLLOUT_BUDGET,
+    "rollout_epsilon": DEFAULT_FUGITIVE_ROLLOUT_EPSILON,
+    "rollout_temperature": DEFAULT_FUGITIVE_ROLLOUT_TEMPERATURE,
+    "opponent_policies": None,
 }
 _HR_MARSHAL_DEFAULTS = {
     "multi_guess_continuation": DEFAULT_HR_MULTI_GUESS_CONTINUATION,
@@ -164,6 +232,26 @@ _ROUTE_COUNT_MARSHAL_DEFAULTS = {
     "multi_guess_continuation": DEFAULT_ROUTE_COUNT_CONTINUATION,
     "max_guess_size": DEFAULT_ROUTE_COUNT_MAX_GUESS_SIZE,
     "max_joint_candidates": DEFAULT_MAX_JOINT_CANDIDATES,
+}
+_SUPPORT_CATALOGUE_MARSHAL_DEFAULTS = {
+    "multi_guess_continuation": (
+        DEFAULT_CATALOGUE_MULTI_GUESS_CONTINUATION
+    ),
+    "max_guess_size": DEFAULT_CATALOGUE_MAX_GUESS_SIZE,
+    "max_joint_candidates": DEFAULT_CATALOGUE_MAX_JOINT_CANDIDATES,
+}
+_ROUTE_COUNT_CATALOGUE_MARSHAL_DEFAULTS = {
+    **_SUPPORT_CATALOGUE_MARSHAL_DEFAULTS,
+    "epsilon": DEFAULT_CATALOGUE_EPSILON,
+}
+_ROLLOUT_MARSHAL_DEFAULTS = {
+    "particle_count": DEFAULT_PARTICLE_COUNT,
+    "max_guess_candidates": DEFAULT_MAX_GUESS_CANDIDATES,
+    "rollout_candidate_count": DEFAULT_MARSHAL_ROLLOUT_CANDIDATES,
+    "max_terminal_simulations": DEFAULT_MARSHAL_ROLLOUT_BUDGET,
+    "rollout_epsilon": DEFAULT_MARSHAL_ROLLOUT_EPSILON,
+    "rollout_temperature": DEFAULT_MARSHAL_ROLLOUT_TEMPERATURE,
+    "opponent_policies": None,
 }
 
 
@@ -345,6 +433,52 @@ FUGITIVE_AGENT_REGISTRY: dict[str, AgentRegistration[FugitiveAgent]] = {
                 "algorithm_id": BIR1_FUGITIVE_ALGORITHM_ID,
             },
         ),
+        AgentRegistration(
+            "continuation-count",
+            Role.FUGITIVE,
+            cast(FugitiveAgentFactory, ContinuationCountFugitiveAgent),
+            user_parameter_defaults=_CONTINUATION_FUGITIVE_DEFAULTS,
+            expensive=True,
+            fixed_algorithm_metadata={
+                "algorithm_id": CONTINUATION_COUNT_FUGITIVE_ALGORITHM_ID,
+                "continuation_mass_id": CONTINUATION_MASS_ID,
+                "continuation_transform_id": CONTINUATION_TRANSFORM_ID,
+                "continuation_cache_id": CONTINUATION_CACHE_ID,
+                "concealment_feature_id": CONCEALMENT_FEATURE_ID,
+                "catch_risk_feature_id": CATCH_RISK_FEATURE_ID,
+                "public_timeline_id": PUBLIC_TIMELINE_ID,
+                "response_model_id": (
+                    "public-path-count-epsilon-soft-single-guess-response-v1"
+                ),
+            },
+        ),
+        AgentRegistration(
+            "belief-rollout",
+            Role.FUGITIVE,
+            cast(FugitiveAgentFactory, BeliefRolloutFugitiveAgent),
+            user_parameter_defaults=_ROLLOUT_FUGITIVE_DEFAULTS,
+            expensive=True,
+            profile_overrides={
+                "interactive": {
+                    "max_terminal_simulations": (
+                        INTERACTIVE_ROLLOUT_TERMINAL_SIMULATIONS
+                    ),
+                    "rollout_candidate_count": (
+                        INTERACTIVE_ROLLOUT_CANDIDATE_COUNT
+                    ),
+                }
+            },
+            fixed_algorithm_metadata={
+                "algorithm_id": BELIEF_ROLLOUT_FUGITIVE_ALGORITHM_ID,
+                "world_model_id": (
+                    "uniform-marshal-hand-by-public-pile-count-v1"
+                ),
+                "rollout_model_id": FUGITIVE_ROLLOUT_MODEL_ID,
+                "rollout_leaf_fugitive_id": (
+                    "bir-1-fugitive-information-set-random-v1"
+                ),
+            },
+        ),
     )
 }
 
@@ -403,6 +537,31 @@ MARSHAL_AGENT_REGISTRY: dict[str, AgentRegistration[MarshalAgent]] = {
             },
         ),
         AgentRegistration(
+            "support-catalogue-random",
+            Role.MARSHAL,
+            cast(MarshalAgentFactory, SupportCatalogueRandomMarshalAgent),
+            user_parameter_defaults=_SUPPORT_CATALOGUE_MARSHAL_DEFAULTS,
+            fixed_algorithm_metadata={
+                "algorithm_id": CONTROLLED_SUPPORT_ALGORITHM_ID,
+                "candidate_catalogue_id": CATALOGUE_SEED_DOMAIN,
+                "weighting_id": "boolean-support-uniform-v1",
+            },
+        ),
+        AgentRegistration(
+            "route-count-catalogue-random",
+            Role.MARSHAL,
+            cast(
+                MarshalAgentFactory,
+                RouteCountCatalogueRandomMarshalAgent,
+            ),
+            user_parameter_defaults=_ROUTE_COUNT_CATALOGUE_MARSHAL_DEFAULTS,
+            fixed_algorithm_metadata={
+                "algorithm_id": CONTROLLED_ROUTE_COUNT_ALGORITHM_ID,
+                "candidate_catalogue_id": CATALOGUE_SEED_DOMAIN,
+                "weighting_id": "compatible-route-count-v1",
+            },
+        ),
+        AgentRegistration(
             "constructive-belief-informed-random",
             Role.MARSHAL,
             cast(
@@ -422,7 +581,7 @@ MARSHAL_AGENT_REGISTRY: dict[str, AgentRegistration[MarshalAgent]] = {
                 }
             },
             fixed_algorithm_metadata={
-                "algorithm_id": BIR2_ALGORITHM_ID,
+                "algorithm_id": BIR2S_ALGORITHM_ID,
                 "proposal_kernel_id": BIR2_PROPOSAL_KERNEL_ID,
                 "sprint_backend": CONSTRUCTIVE_SPRINT_BACKEND,
                 "belief_seed_domain": BIR2_BELIEF_SEED_DOMAIN,
@@ -456,6 +615,39 @@ MARSHAL_AGENT_REGISTRY: dict[str, AgentRegistration[MarshalAgent]] = {
                 "belief_seed_domain": BIR2U_BELIEF_SEED_DOMAIN,
                 "reference_target_id": BIR2U_REFERENCE_TARGET_ID,
                 "weighting_id": BIR2U_WEIGHTING_ID,
+            },
+        ),
+        AgentRegistration(
+            "rollout-bir2u",
+            Role.MARSHAL,
+            cast(MarshalAgentFactory, RolloutBIR2UMarshalAgent),
+            user_parameter_defaults=_ROLLOUT_MARSHAL_DEFAULTS,
+            expensive=True,
+            profile_overrides={
+                "interactive": {
+                    "particle_count": INTERACTIVE_ROLLOUT_PARTICLE_COUNT,
+                    "max_guess_candidates": (
+                        INTERACTIVE_ROLLOUT_MAX_GUESS_CANDIDATES
+                    ),
+                    "max_terminal_simulations": (
+                        INTERACTIVE_ROLLOUT_TERMINAL_SIMULATIONS
+                    ),
+                    "rollout_candidate_count": (
+                        INTERACTIVE_ROLLOUT_CANDIDATE_COUNT
+                    ),
+                }
+            },
+            fixed_algorithm_metadata={
+                "algorithm_id": ROLLOUT_BIR2U_MARSHAL_ALGORITHM_ID,
+                "belief_backend_id": "constructive-unweighted-sequential-v1",
+                "proposal_kernel_id": BIR2U_PROPOSAL_KERNEL_ID,
+                "belief_seed_domain": BIR2U_BELIEF_SEED_DOMAIN,
+                "reference_target_id": BIR2U_REFERENCE_TARGET_ID,
+                "weighting_id": BIR2U_WEIGHTING_ID,
+                "rollout_model_id": MARSHAL_ROLLOUT_MODEL_ID,
+                "rollout_leaf_marshal_id": (
+                    "hr-1.1c-marshal-shared-catalogue-route-count-v1"
+                ),
             },
         ),
         AgentRegistration(
@@ -538,5 +730,9 @@ __all__ = [
     "INTERACTIVE_MCMC_BIR_MAX_GUESS_CANDIDATES",
     "INTERACTIVE_MCMC_BIR_PARTICLE_COUNT",
     "INTERACTIVE_MCMC_BIR_STEPS_PER_CHAIN",
+    "INTERACTIVE_ROLLOUT_CANDIDATE_COUNT",
+    "INTERACTIVE_ROLLOUT_MAX_GUESS_CANDIDATES",
+    "INTERACTIVE_ROLLOUT_PARTICLE_COUNT",
+    "INTERACTIVE_ROLLOUT_TERMINAL_SIMULATIONS",
     "MARSHAL_AGENT_REGISTRY",
 ]

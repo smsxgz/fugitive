@@ -10,7 +10,11 @@ from urllib.request import Request, urlopen
 import pytest
 
 from fugitive.agents.exact_sprint_bir import EXACT_SPRINT_ALGORITHM_ID
-from fugitive.agents.registry import MARSHAL_AGENT_REGISTRY
+from fugitive.agents.registry import (
+    FUGITIVE_AGENT_REGISTRY,
+    MARSHAL_AGENT_REGISTRY,
+)
+from fugitive.driver import DrawDecision
 from fugitive.inference_diagnostics import (
     BeliefQualityDiagnostics,
     BootstrapInferenceWorkDiagnostics,
@@ -18,6 +22,8 @@ from fugitive.inference_diagnostics import (
 )
 from fugitive.model import FugitiveAction, Phase, Role
 from fugitive.rules import legal_fugitive_actions
+from fugitive.rollout import RolloutBudget
+from fugitive.rollout_diagnostics import RolloutDiagnosticsSnapshot
 from fugitive.web import (
     DEFAULT_FUGITIVE_AGENT,
     DEFAULT_MARSHAL_AGENT,
@@ -93,6 +99,61 @@ class FailingDiagnosticsMarshal(DiagnosticsMarshal):
         raise RuntimeError("diagnostics unavailable")
 
 
+class RolloutDiagnosticsFugitive:
+    def __init__(self) -> None:
+        self._last_action = FugitiveAction(1)
+
+    def choose_draw_pile(self, observation):
+        pile = observation.legal_draw_piles[0]
+        self._last_action = DrawDecision(pile)
+        return pile
+
+    def choose_fugitive_action(self, observation):
+        action = FugitiveAction(len(observation.route))
+        self._last_action = action
+        return action
+
+    def rollout_diagnostics(self) -> RolloutDiagnosticsSnapshot:
+        return RolloutDiagnosticsSnapshot.shortcut(
+            algorithm_id="test-fugitive-rollout-v1",
+            rollout_model_id="test-model-v1",
+            role=Role.FUGITIVE,
+            plan=RolloutBudget(1).plan(1),
+            action=self._last_action,
+        )
+
+
+class RolloutDiagnosticsMarshal:
+    def __init__(self) -> None:
+        self._last_action = DrawDecision(0)
+
+    def choose_draw_pile(self, observation):
+        pile = observation.legal_draw_piles[0]
+        self._last_action = DrawDecision(pile)
+        return pile
+
+    def choose_guess(self, _observation):
+        return (1,)
+
+    def rollout_diagnostics(self) -> RolloutDiagnosticsSnapshot:
+        return RolloutDiagnosticsSnapshot.shortcut(
+            algorithm_id="test-marshal-rollout-v1",
+            rollout_model_id="test-model-v1",
+            role=Role.MARSHAL,
+            plan=RolloutBudget(1).plan(1),
+            action=self._last_action,
+        )
+
+
+class FailingRolloutDiagnosticsMarshal(RolloutDiagnosticsMarshal):
+    def __init__(self) -> None:
+        self.diagnostic_calls = 0
+
+    def rollout_diagnostics(self) -> RolloutDiagnosticsSnapshot:
+        self.diagnostic_calls += 1
+        raise RuntimeError("rollout diagnostics unavailable")
+
+
 def test_agent_catalog_is_role_specific_and_marks_expensive_agents() -> None:
     catalog = agent_catalog()
 
@@ -106,8 +167,11 @@ def test_agent_catalog_is_role_specific_and_marks_expensive_agents() -> None:
         "hierarchical-random",
         "belief-informed-random",
         "route-count-random",
+        "support-catalogue-random",
+        "route-count-catalogue-random",
         "constructive-belief-informed-random",
         "unweighted-constructive-belief-informed-random",
+        "rollout-bir2u",
         "exact-sprint-belief-informed-random",
         "mcmc-belief-informed-random",
     }
@@ -119,6 +183,8 @@ def test_agent_catalog_is_role_specific_and_marks_expensive_agents() -> None:
         "Belief-Informed Random (BIR-1)"
     )
     assert fugitive["belief-informed-random"]["role"] == "fugitive"
+    assert fugitive["continuation-count"]["expensive"] is True
+    assert fugitive["belief-rollout"]["expensive"] is True
     marshal = {item["id"]: item for item in catalog["marshal"]}
     assert marshal["route-count-random"]["label"] == (
         "Route-Count Random (HR-1.1)"
@@ -135,7 +201,11 @@ def test_agent_catalog_is_role_specific_and_marks_expensive_agents() -> None:
     assert marshal["mcmc-belief-informed-random"]["label"] == (
         "BIR-3 \u00b7 SIR + Independent MH"
     )
-    assert all(item["expensive"] is False for item in catalog["fugitive"])
+    assert all(
+        item["expensive"]
+        == FUGITIVE_AGENT_REGISTRY[item["id"]].expensive
+        for item in catalog["fugitive"]
+    )
     assert all(item["role"] == "marshal" for item in catalog["marshal"])
     assert all(
         item["expensive"] == MARSHAL_AGENT_REGISTRY[item["id"]].expensive
@@ -474,6 +544,92 @@ def test_diagnostics_failure_does_not_repeat_or_undo_web_action() -> None:
     reset = session.reset(seed=73)
     assert reset["inference_diagnostic_failures"] == []
     assert session._inference_diagnostic_failures == []
+
+
+def test_rollout_diagnostics_are_role_redacted_retained_and_exported() -> None:
+    session = make_session("spectate")
+    session.fugitive_player = RolloutDiagnosticsFugitive()
+    session.marshal_player = RolloutDiagnosticsMarshal()
+
+    session.step()
+    session.step()
+    omniscient = session.step()
+
+    assert [event["decision"] for event in omniscient["rollout_events"]] == [
+        1,
+        2,
+        3,
+    ]
+    assert [
+        event["decision"]
+        for event in session.set_spectator_view("fugitive")["rollout_events"]
+    ] == [1, 2]
+    assert [
+        event["decision"]
+        for event in session.set_spectator_view("marshal")["rollout_events"]
+    ] == [3]
+    assert session.set_spectator_view("public")["rollout_events"] == []
+
+    session.terminate()
+    exported = session.export_trace()
+    assert [event["decision"] for event in exported["rollout_events"]] == [
+        1,
+        2,
+        3,
+    ]
+    assert exported["rollout_diagnostic_failures"] == []
+    assert exported["replay_manifest"] is None
+
+    reset = session.reset(seed=73)
+    assert reset["rollout_events"] == []
+    assert session._rollout_events == []
+
+
+def test_rollout_diagnostics_failure_does_not_undo_web_action() -> None:
+    session = make_session("spectate")
+    failing_marshal = FailingRolloutDiagnosticsMarshal()
+    session.marshal_player = failing_marshal
+
+    session.step()
+    session.step()
+    before = session.engine.observation(Role.MARSHAL)
+    state = session.step()
+    after = session.engine.observation(Role.MARSHAL)
+
+    assert failing_marshal.diagnostic_calls == 1
+    assert session._decision_count == 3
+    assert len(session._decision_trace) == 3
+    assert len(after.hand) == len(before.hand) + 1
+    assert sum(after.pile_sizes) == sum(before.pile_sizes) - 1
+    assert state["status"] == "running"
+    assert state["rollout_events"] == []
+    assert state["rollout_diagnostic_failures"] == [
+        {
+            "decision": 3,
+            "round_number": 1,
+            "phase": Phase.MARSHAL_DRAW.value,
+            "role": Role.MARSHAL.value,
+            "error": {
+                "type": "RuntimeError",
+                "message": "rollout diagnostics unavailable",
+            },
+        }
+    ]
+
+    assert session.as_dict()["rollout_diagnostic_failures"]
+    assert session.set_spectator_view("public")[
+        "rollout_diagnostic_failures"
+    ] == []
+    assert len(
+        session.set_spectator_view("marshal")[
+            "rollout_diagnostic_failures"
+        ]
+    ) == 1
+    assert failing_marshal.diagnostic_calls == 1
+
+    reset = session.reset(seed=73)
+    assert reset["rollout_diagnostic_failures"] == []
+    assert session._rollout_diagnostic_failures == []
 
 
 def test_human_actions_do_not_collect_agent_diagnostics_or_expose_agent_events() -> None:

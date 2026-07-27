@@ -12,11 +12,13 @@
     -> self-normalized importance sampling
     -> exact Sprint reference
     -> SIR + independent Metropolis-Hastings
+    -> continuation count 与完整终局 rollout
+    -> 双侧 Policy-Space Response Oracles (PSRO)
 ```
 
 所有 Agent 都运行完整游戏，没有 mini game，也没有规则层的最大回合数或平局。
 
-> 当前实现是一组 stochastic baselines 和 inference approximations，不是 Nash equilibrium、CFR、minimax 或经过证明的 optimal/near-optimal strategy。实验胜率只表示指定 Agent、参数和 seed 分布之间的经验结果，不等于游戏的理论价值。
+> 当前实现包含 stochastic baselines、inference approximations、full-game rollout 和经验 PSRO。PSRO 的解只针对当前有限策略群体和采样收益矩阵；它不是完整 Fugitive 博弈的 Nash equilibrium，也不是经过证明的 optimal/near-optimal strategy。实验胜率只表示指定 Agent、参数和 seed 分布之间的经验结果，不等于游戏的理论价值。
 
 ## 快速开始
 
@@ -134,6 +136,8 @@ C(S) = |S| + 0.5 * overpay(S) + 0.75 * future_cards(S)
 | --- | --- | --- | --- |
 | `hierarchical-random` | HR-1 | 分层合法随机 | [hierarchical_random.py](src/fugitive/agents/hierarchical_random.py) |
 | `belief-informed-random` | BIR-1 Fugitive | 信息集启发式 + epsilon-softmax | [bir_fugitive.py](src/fugitive/agents/bir_fugitive.py) |
+| `continuation-count` | Continuation Count | 有限深度续着数 + 公开隐蔽性 | [continuation_count_fugitive.py](src/fugitive/agents/continuation_count_fugitive.py) |
+| `belief-rollout` | Belief Rollout | 采样 Marshal 手牌并模拟到终局 | [belief_rollout_fugitive.py](src/fugitive/agents/belief_rollout_fugitive.py) |
 
 ### Marshal
 
@@ -141,8 +145,11 @@ C(S) = |S| + 0.5 * overpay(S) + 0.75 * future_cards(S)
 | --- | --- | --- | --- |
 | `hierarchical-random` | HR-1 | hard route support | [hierarchical_random.py](src/fugitive/agents/hierarchical_random.py) |
 | `route-count-random` | HR-1.1 | exact compatible-route counts | [route_count_random.py](src/fugitive/agents/route_count_random.py) |
+| `support-catalogue-random` | HR-1C | 共享候选集上的 Boolean support | [support_catalogue_random.py](src/fugitive/agents/support_catalogue_random.py) |
+| `route-count-catalogue-random` | HR-1.1C | 同一候选集上的 route-count weight | [route_count_catalogue_random.py](src/fugitive/agents/route_count_catalogue_random.py) |
 | `belief-informed-random` | BIR-1 | constructive bootstrap particle filter | [bootstrap_bir.py](src/fugitive/agents/bootstrap_bir.py) |
 | `unweighted-constructive-belief-informed-random` | BIR-2U | observation-local unweighted constructive samples | [unweighted_constructive_bir.py](src/fugitive/agents/unweighted_constructive_bir.py) |
+| `rollout-bir2u` | Rollout BIR-2U | BIR-2U 根 belief + 完整终局 rollout | [rollout_bir2u_marshal.py](src/fugitive/agents/rollout_bir2u_marshal.py) |
 | `constructive-belief-informed-random` | BIR-2S | observation-local constructive SNIS | [constructive_bir.py](src/fugitive/agents/constructive_bir.py) |
 | `exact-sprint-belief-informed-random` | BIR-2E | exact Sprint DP reference + SNIS | [exact_sprint_bir.py](src/fugitive/agents/exact_sprint_bir.py) |
 | `mcmc-belief-informed-random` | BIR-3 | SIR + finite-step independent MH | [mcmc_bir.py](src/fugitive/agents/mcmc_bir.py) |
@@ -187,6 +194,22 @@ P(a) = epsilon / |A|
 Manhunt 生存值通过逐猜 rollout 估计：模拟 Marshal 猜中后揭示对应 Hideout/Sprint，再更新 shadow `PathBelief` 后选择下一猜。
 
 这个 shadow Marshal 不知道真实 Marshal 手牌，也没有行为 likelihood；Pass 评分也没有完整模拟中间的 Marshal 回合。因此它是 information-set heuristic，不是 Bayesian planner。
+
+### Continuation Count Fugitive
+
+`continuation-count` 保留 BIR Fugitive 的分层候选，只替换动作评分。它递归统计有限深度内的 bounded Hideout/Sprint **动作树节点质量**；不同 Sprint payment 是不同分支，因此这个量不是 distinct future routes 的数量。每个决策先计算所有候选的 `log1p(count)`，再除以当前候选集最大值，而不是用固定常数截断。相同 `(sorted hand, previous hideout, depth)` 子问题使用 agent-local 精确 memo。
+
+隐蔽性是公开 `PathBelief` 的 hidden-card marginal entropy，catch risk 是 epsilon-soft 单猜 response 在真实隐藏 Hideout 上的质量。Marshal shadow 保留已经发生的公开 Play/Pass 时间线，并追加当前假设动作；它不使用 Marshal 私有手牌。各项都有显式权重，可分别消融。
+
+这个 Agent 的价值是把“保留未来机动性”和“当前隐藏点是否容易被猜”写成可检查的中间量；它仍然没有采样真实 Marshal 手牌，也不模拟完整对手策略。
+
+### Belief-Rollout Fugitive
+
+`belief-rollout` 先用 Continuation Count 产生有限候选，再从 Fugitive 信息集采样世界。Fugitive 已知自己的手牌、路线和具体抽牌，因此未知量只剩：Marshal 从每个公开牌堆抽走了哪些牌，以及未来牌序。采样器按公开抽牌次数均匀分配 Marshal 手牌，其余牌随机排序。
+
+每个候选动作在相同 sampled worlds、未来牌序和 continuation-policy seeds 下模拟到规则终局，最终按 Fugitive 胜率做 epsilon-softmax。候选在查看世界前固定，continuation agent 只接收自己的正常 Observation。该策略是 root-sampled Monte Carlo response，不是完整 belief-state dynamic programming。
+
+计算量由一个确定性的 `max_terminal_simulations` 总预算控制。预算在候选之间平均分成 paired scenarios，不足一个完整候选组的余数明确不用；每个已运行的 simulation 都到达规则终局，没有 horizon、wall-clock cutoff 或伪造赢家。若应用预算后只评估一个候选，策略在采样世界之前直接返回概率 1。
 
 ## Marshal 的路线模型
 
@@ -234,7 +257,12 @@ P(n) proportional to count(n)^alpha
 
 并混入 10% uniform epsilon。多猜使用联合 route count，而不是边际概率乘积；Manhunt 使用 `count(n)^2`，每次揭示后重新计算。
 
-因此 HR-1 与 HR-1.1 的对比主要回答：
+旧 `hierarchical-random` 与 `route-count-random` 的候选生成历史不同，因此它们适合展示两种完整 baseline，但不是严格单变量消融。为隔离 weighting 的影响，项目另外提供：
+
+- `support-catalogue-random` (HR-1C)；
+- `route-count-catalogue-random` (HR-1.1C)。
+
+两者都调用 [`build_marshal_guess_catalogue`](src/fugitive/agents/marshal_candidates.py)，共享单猜、pair/triple 候选、候选上限、猜测规模先验和 observation-derived 随机域；唯一核心差异是支持集等权还是按 compatible-route count 加权。因此 HR-1C 与 HR-1.1C 才直接回答：
 
 > 只知道“可能/不可能”是否足够，还是 route completion mass 能显著改善猜测？
 
@@ -261,6 +289,14 @@ Q(G) = |G| * P(success)
 - Manhunt：按当前 particle marginal 的 `p(n)^alpha` 加 epsilon 选择单猜，揭示后重新推断。
 
 共享策略让 BIR 系列更适合教学比较：胜率差异主要来自 belief representation、proposal weighting 和更新方式，而不是每个文件各自实现了一套猜测启发式。
+
+### Rollout BIR-2U Marshal
+
+`rollout-bir2u` 使用 BIR-2U 生成根节点 complete-world belief，并由共享 BIR 动作策略给出有限 shortlist。随后对粒子按当前权重重采样，为每个世界随机生成未来牌序，再把每个候选猜测或抽牌动作模拟到规则终局。
+
+候选之间使用 common random numbers：相同世界、相同未来牌序、相同 Fugitive/Marshal continuation seeds。这样动作价值差异较少被无关 Monte Carlo 噪声淹没。默认对手是冻结的 Fugitive 策略混合。计算量与 Fugitive rollout 一样由 `max_terminal_simulations` 统一限制；所有实际运行的样本都模拟到规则终局。shortlist 在应用预算后只剩一个候选时，会跳过 root belief resampling、world generation 和 terminal rollout。
+
+两侧 rollout 都提供独立 diagnostics side channel：候选胜场、paired outcome 四格表、动作差值与标准误、实际 terminal simulations 和 continuation decisions。它们不会进入动作 Observation，也不改变 replay。
 
 ## Complete-world constructive inference
 
@@ -388,9 +424,9 @@ Acceptance rate 可能包含“接受了相同 world”；change rate 更接近�
 
 ## 最有教学价值的比较
 
-### 1. HR-1 Marshal vs HR-1.1 Marshal
+### 1. HR-1C Marshal vs HR-1.1C Marshal
 
-控制抽牌为均匀，只比较 Boolean route support 与 route-count weighting。
+共享完全相同的候选 catalogue、猜测规模先验和随机域，只比较 Boolean route support 与 route-count weighting。旧 HR-1/HR-1.1 仍可作为历史完整策略比较，但不能解释成严格单变量实验。
 
 ### 2. BIR-1 Marshal vs BIR-2U
 
@@ -418,6 +454,10 @@ Acceptance rate 可能包含“接受了相同 world”；change rate 更接近�
 ### 6. HR-1 Fugitive vs BIR Fugitive
 
 两者共享分层动作抽象，主要比较纯随机宏动作与进度、资源、mobility、Pass、Manhunt 启发式评分。
+
+### 7. 启发式 vs full-game rollout
+
+Fugitive 可比较 BIR、Continuation Count 与 Belief Rollout；Marshal 可比较 BIR-2U 与 Rollout BIR-2U。报告时必须同时给出 shortlist 大小、`max_terminal_simulations`、实际使用/未使用的预算、wall-clock 时间和对手策略混合，否则胜率提升无法与额外计算预算分开解释。
 
 ## 诊断指标
 
@@ -455,11 +495,12 @@ Diagnostics 在动作已经提交后读取，是不影响策略的 side channel�
 | --- | ---: | ---: |
 | BIR-1 | 2000 | 384 |
 | BIR-2U | 2000 | 128 |
+| Rollout BIR-2U | 2000；192 terminal simulations；8 candidates | 64；12 terminal simulations；3 candidates |
 | BIR-2S | 2000 | 128 |
 | BIR-2E | 128 | 32 |
 | BIR-3 | 1000 | 256 |
 
-BIR-3 两个 profile 默认都是每条 chain 1 个 MH step。BIR-2E 被设计为慢速 reference；复杂 action 运行数分钟是允许的。
+BIR-3 两个 profile 默认都是每条 chain 1 个 MH step。Belief-Rollout Fugitive 的 `full/quick` 分别使用 192/12 个 terminal simulations 和 8/3 个 candidates。BIR-2E 与 rollout Agent 被设计为慢速教学算法；复杂 action 运行数分钟是允许的。
 
 完整、可复现的参数 schema 在 [registry.py](src/fugitive/agents/registry.py) 中显式定义。固定的 algorithm、proposal、reference target、weighting、seed domain 和 MCMC kernel ID 会进入 AgentSpec。
 
@@ -536,7 +577,7 @@ fugitive-tournament `
   --output experiment_runs/hr-comparison
 ```
 
-同一个 game index 在所有 matchup 中共享一个派生 master seed，便于做 paired comparison。每局结束后立即追加 `games.jsonl`，并分别保存 replay manifest 和 inference diagnostics；`summary.json`、`summary.csv` 与 `summary.md` 会同步更新。正式默认仍是 `max_decisions=None`，错误和显式 watchdog 截断不会被算成任一方获胜。
+同一个 game index 在所有 matchup 中共享一个派生 master seed，便于做 paired comparison。每局结束后立即追加 `games.jsonl`，并分别保存 replay manifest、inference diagnostics 和 rollout diagnostics；`summary.json`、`summary.csv` 与 `summary.md` 会同步更新。rollout side channel 包含实际/未用 simulation 预算、paired outcomes、动作差值和标准误，但不进入 replay manifest，也不改变随机轨迹。正式默认仍是 `max_decisions=None`，错误和显式 watchdog 截断不会被算成任一方获胜。
 
 中断后可以续跑，也可以把每个 matchup 的目标局数从较小的校准值增加到较大值：
 
@@ -553,6 +594,59 @@ fugitive-tournament `
 ```
 
 续跑时，Agent 集合、profiles、root seed、规则指纹和 watchdog 设置必须保持不变；已有对局不会重复执行。`experiment_runs/` 默认不进入 Git，正式报告应引用其配置、代码 commit 和原始结果文件。
+
+## PSRO 经验策略搜索
+
+[`psro.py`](src/fugitive/psro.py) 实现角色分离的完整 Policy-Space Response Oracles 循环：
+
+```text
+策略群体
+  -> 补齐缺失的完整对局收益格
+  -> 求解有限零和经验矩阵的双侧元策略
+  -> Fugitive 与 Marshal 分别产生对手混合下的 response candidate
+  -> 用独立 seeds 与当前 restricted pure best response 成对比较
+  -> 只有提升置信区间下界通过阈值才加入，并只评估新增行/列
+  -> 保存 checkpoint
+```
+
+经验矩阵统一使用 Marshal 胜率，因此 Marshal 最大化、Fugitive 最小化。内置 meta-solver 是 simultaneous multiplicative weights；它报告当前受限矩阵内的 lower/upper bound、双侧 response residual 和 duality gap。这些是 restricted-game diagnostics，不是完整游戏 exploitability。
+
+[`psro_policy_adapter.py`](src/fugitive/psro_policy_adapter.py) 把通用核心连接到 registry；[`psro_payoff.py`](src/fugitive/psro_payoff.py) 负责完整对局收益、validation 和 holdout；[`psro_experiment.py`](src/fugitive/psro_experiment.py) 只编排 checkpoint 与迭代。每个 pure policy 保存一次真实执行 `AgentSpec` 和一次声明的 non-search planning leaf。search response 在 checkpoint 中只引用对手 `policy_id + weight`；运行 payoff game 时再从当前 `PolicyPopulation` repository 解析 leaf specs。顶层 search 的 planning depth 固定为 1：如果 rollout 选中另一个 search policy，只执行后者声明的 leaf，不会递归启动第二层 rollout。
+
+默认 response candidates 是便宜的 `continuation-count` Fugitive 和 BIR-2U Marshal，默认 population 不含这两个候选。它们不读取当前 opponent mixture，所以默认运行是一次经过验证的 population augmentation：候选被接纳或拒绝后，下一代通常没有新的不同 policy。要研究真正随 mixture 变化的多代 response，可显式使用 `belief-rollout` / `rollout-bir2u`；它们会读取冻结的 opponent leaf mixture，但计算成本也高得多。
+
+payoff evaluation 使用 append-only file-per-game ledger。每个完整对局结束后立即原子写入 raw outcome、manifest 和确定性 sample ID；identity 同时包含规则版本与规则哈希，中断后只补缺失 seed。CLI 默认最多使用 4 个进程，把不同 cell/game 一起并行，并在 stderr 显示 schedule、完成数和复用数。checkpoint 仍按完整 generation 保存，但昂贵的 generation 中间结果已由 ledger 独立保护。
+
+seed schedule 分为互不重叠的 `meta-train`、`response-validation` 和 `final-holdout` 三个域：
+
+- `meta-train` 只用于 restricted payoff matrix 和 meta-strategy；
+- `response-validation` 中保存的是 base seeds；每一代先从它们确定性派生一批新的 game seeds。一个派生 seed 从对手 mixture 抽取一个 pure opponent，candidate 与当前 restricted pure best response 再共享同一个完整对局 seed。这样保留代内 common random numbers，同时避免不同 generation 反复使用同一批牌序和策略随机流。角色胜率差形成 paired gains，并用确定性的 percentile bootstrap 求置信区间；只有下界严格高于 `response_minimum_gain` 才接纳 candidate；
+- `final-holdout` 从最终双方 mixture 抽样并报告 Marshal payoff 及 bootstrap interval。它不写回 payoff matrix，也不参与 policy 选择。
+
+所有 validation 报告都会跨代累计进 checkpoint；被拒策略不会进入 population。这里的“通过验证”只表示该有限 candidate 在给定样本和置信阈值下优于当前 restricted pure response，不等于它是完整 Fugitive 游戏的精确 best response。
+
+安装后可运行：
+
+```powershell
+fugitive-psro `
+  --fugitive hierarchical-random `
+  --fugitive belief-informed-random `
+  --marshal support-catalogue-random `
+  --marshal route-count-catalogue-random `
+  --games-per-cell 20 `
+  --response-validation-games 40 `
+  --final-holdout-games 100 `
+  --response-minimum-gain 0.0 `
+  --confidence-level 0.95 `
+  --bootstrap-replicates 10000 `
+  --workers 4 `
+  --generations 3 `
+  --seed 20260726 `
+  --ledger experiment_runs/psro/payoffs `
+  --output experiment_runs/psro/checkpoint.json
+```
+
+`--resume` 从 checkpoint 继续，并使用其中记录的实验配置。ledger 路径不写入 checkpoint：首次运行使用默认 ledger 且沿用同一个 output 路径时可以省略；如果传过自定义 `--ledger`，或 resume 时改变 `--output`，必须再次传入原 ledger 路径，才会复用已经完成的游戏。正式默认没有 decision cutoff。要显式研究 search response，可设置 `--fugitive-response-agent belief-rollout` 或 `--marshal-response-agent rollout-bir2u`，并通过对应的 `--*-response-parameters` JSON 指定预算；这类运行仍可能很慢。
 
 最小 API 示例：
 
@@ -595,6 +689,27 @@ validate_marshal_observation_contract(marshal_observation)
 
 它不会重放完整 phase machine，不证明 Observation 来自合法完整对局，也不保证至少存在一个相容 hidden world。这个边界是有意保留的，避免为了防御引擎不可能产生的状态而让教学代码失去清晰度。
 
+### 固定 Observation inference benchmark
+
+直接比较不同 BIR 对局胜率会同时混入 belief 质量、动作策略和随机牌局。`fugitive-inference-benchmark` 会重放同一批 manifest，在每个 Marshal 决策前截取完全相同的 Observation，然后分别运行 BIR-1/2U/2S/2E/3 backend：
+
+```powershell
+fugitive-inference-benchmark `
+  experiment_runs/reference/manifests/game-000001.json `
+  --agent BIR-1 `
+  --agent BIR-2U `
+  --agent BIR-2S `
+  --parameters '{"particle_count": 2000}' `
+  --replicates 3 `
+  --output experiment_runs/inference-benchmark.json
+```
+
+输出包括 hidden-card Brier score/log loss、真实 hidden route 的 posterior mass/rank/top-k coverage，以及共享猜测 catalogue 上的 joint calibration bins。离线真值只在 `backend.infer(observation)` 返回后用于评分；同一 manifest/replicate 内复用同一个 backend 实例，因此 BIR-1 保留增量 filter 语义，而不同 manifest 或 replicate 之间重新构建。
+
+外层 `comparison_seed` 只由 benchmark root seed、manifest canonical hash 和 replicate 产生，与 backend 名称及参数无关。于是相同粒子数的 BIR-2U/BIR-2S 会收到同一组 ordered constructive proposals，只改变是否使用 importance weights；Agent 名称和参数哈希仍写入结果元数据，但不参与配对 seed。
+
+输出同时提供逐 manifest/replicate 的 `runs` 和 `game_first` 汇总。`game_first` 先在每个 source game 内等权平均 inference replicates，再让不同 source game 等权进入总结果；重复输入同一 manifest 不会让该局获得额外权重。它还保留逐 replicate 的跨游戏汇总，便于做 backend 间的 paired comparison。joint-calibration bins 仍按原始 run 报告，不对已经分箱的结果做含义不清的二次平均。
+
 ## 代码结构
 
 ```text
@@ -607,13 +722,20 @@ src/fugitive/
   agents/
     hierarchical_random.py       # HR-1 Fugitive/Marshal
     route_count_random.py        # HR-1.1 Marshal
+    marshal_candidates.py        # 受控 HR 共享猜测 catalogue
+    support_catalogue_random.py  # HR-1C
+    route_count_catalogue_random.py # HR-1.1C
     bir_fugitive.py              # BIR Fugitive heuristic
+    continuation_count_fugitive.py # 续着数/隐蔽性 Fugitive
+    belief_rollout_fugitive.py   # Fugitive full-game rollout
     marshal_belief_policy.py     # 所有 Marshal BIR 共用的动作策略
     bootstrap_bir.py             # BIR-1 backend + agent
     unweighted_constructive_bir.py # BIR-2U
     constructive_bir.py          # BIR-2S
     exact_sprint_bir.py          # BIR-2E
     mcmc_bir.py                  # BIR-3
+    rollout_bir2u_marshal.py     # Marshal full-game rollout
+    policy_mixture.py            # 可重放的 opponent meta-mixture
     registry.py                  # 可复现参数与算法元数据
 
   inference/
@@ -634,7 +756,18 @@ src/fugitive/
   observation_validation.py      # 轻量 Observation 契约
   world_validation.py            # complete-world 一致性
   reproducibility.py             # seed 与 AgentSpec 协议
+  determinization.py             # 双侧 information-safe 世界重建
+  rollout.py                     # common-random-number 终局模拟
+  rollout_diagnostics.py         # paired rollout 结果与工作量 side channel
   experiment.py                  # 完整对局、manifest 与 replay
+  observation_benchmark.py       # 固定 Observation 评分 primitives
+  inference_benchmark.py         # inference benchmark CLI
+  psro.py                        # 通用零和 PSRO 核心
+  psro_policy_adapter.py         # registry policy 与 response 适配
+  psro_payoff.py                 # full-game payoff、validation 与 holdout
+  psro_experiment.py             # checkpoint 与迭代编排
+  planning_leaf.py               # search policy -> non-search leaf 投影
+  payoff_ledger.py               # append-only per-game PSRO 收益记录
   tournament.py                  # 配对、断点续跑的批量实验
   web.py                         # 本地 Web API/session
   web_static/                    # 浏览器界面
@@ -658,6 +791,9 @@ python -m pytest tests/test_observation_validation.py
 python -m pytest tests/test_unweighted_constructive_bir.py
 python -m pytest tests/test_exact_sprint_bir.py
 python -m pytest tests/test_mcmc_bir.py
+python -m pytest tests/test_rollout.py
+python -m pytest tests/test_observation_benchmark.py
+python -m pytest tests/test_psro.py
 python -m pytest tests/test_reproducibility_integration.py
 python -m pytest tests/test_web.py
 ```
@@ -674,6 +810,11 @@ python -m pytest tests/test_web.py
 - duplicate proposal multiplicity；
 - sequential 与 exact Sprint backend 的小状态枚举对照；
 - independent-MH 接受率、kernel metadata 和 diagnostics；
+- 双侧 determinization、私有信息隔离、common random numbers 和终局 rollout；
+- 固定 Observation proper scores、route coverage 与 joint calibration；
+- 固定 Observation 多 replicate、跨 backend common comparison seed 与 U/S 同 proposals；
+- PSRO 缺失格增量评估、meta-solver residual、双侧 response 和 checkpoint round trip；
+- PSRO policy-ID leaf materialization、非递归 search、逐局 ledger 恢复和多进程 payoff；
 - seed domain separation、manifest replay 和 Web 64-bit seed round trip；
 - reviewer 发现的合法 Manhunt long-tail 状态回归。
 

@@ -44,7 +44,7 @@ from .marshal_belief_policy import (
     DEFAULT_MAX_GUESS_CANDIDATES,
     BeliefInformedMarshalActionPolicy,
     ComposedBeliefInformedRandomMarshalAgent,
-    _marshal_rng_and_belief_salt,
+    marshal_rng_and_belief_salt,
 )
 from .constructive_bir import (
     BIR2_PROPOSAL_KERNEL_ID,
@@ -283,7 +283,7 @@ class MCMCBeliefInformedRandomMarshalAgent(
             or mh_steps_per_chain < 1
         ):
             raise ValueError("mh_steps_per_chain must be a positive integer")
-        policy_rng, belief_salt = _marshal_rng_and_belief_salt(seed, rng)
+        policy_rng, belief_salt = marshal_rng_and_belief_salt(seed, rng)
         sampler = _sampler or ConstructiveWorldSampler(
             sprint_backend=CONSTRUCTIVE_SPRINT_BACKEND
         )

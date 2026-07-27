@@ -210,20 +210,24 @@ def test_registration_rejects_ambiguous_schema_definitions() -> None:
 
 def test_typed_registries_contain_only_role_appropriate_agents() -> None:
     common = {"hierarchical-random", "belief-informed-random"}
+    fugitive_only = {"continuation-count", "belief-rollout"}
     marshal_only = {
         "route-count-random",
+        "support-catalogue-random",
+        "route-count-catalogue-random",
         "constructive-belief-informed-random",
         "unweighted-constructive-belief-informed-random",
+        "rollout-bir2u",
         "exact-sprint-belief-informed-random",
         "mcmc-belief-informed-random",
     }
-    assert set(FUGITIVE_AGENT_REGISTRY) == common
+    assert set(FUGITIVE_AGENT_REGISTRY) == common | fugitive_only
     assert set(MARSHAL_AGENT_REGISTRY) == common | marshal_only
 
     for name, registration in FUGITIVE_AGENT_REGISTRY.items():
         assert registration.name == name
         assert registration.role is Role.FUGITIVE
-        assert not registration.expensive
+        assert registration.expensive is (name in fugitive_only)
 
     for name, registration in MARSHAL_AGENT_REGISTRY.items():
         assert registration.name == name
@@ -232,15 +236,24 @@ def test_typed_registries_contain_only_role_appropriate_agents() -> None:
             "belief-informed-random",
             "constructive-belief-informed-random",
             "unweighted-constructive-belief-informed-random",
+            "rollout-bir2u",
             "exact-sprint-belief-informed-random",
             "mcmc-belief-informed-random",
         })
 
 
+def test_controlled_catalogue_registry_has_no_noop_parameters() -> None:
+    support = MARSHAL_AGENT_REGISTRY["support-catalogue-random"]
+    route_count = MARSHAL_AGENT_REGISTRY["route-count-catalogue-random"]
+
+    assert "epsilon" not in support.user_parameter_defaults
+    assert "epsilon" in route_count.user_parameter_defaults
+
+
 def test_new_random_baselines_are_role_specific_and_default_to_bir() -> None:
     common = {"hierarchical-random", "belief-informed-random"}
 
-    assert common == set(FUGITIVE_AGENT_REGISTRY)
+    assert common < set(FUGITIVE_AGENT_REGISTRY)
     assert common < set(MARSHAL_AGENT_REGISTRY)
     assert DEFAULT_FUGITIVE_AGENT == "belief-informed-random"
     assert DEFAULT_MARSHAL_AGENT == "belief-informed-random"
@@ -257,6 +270,11 @@ def test_new_random_baselines_are_role_specific_and_default_to_bir() -> None:
         marshal = MARSHAL_AGENT_REGISTRY[name].create(7)
         assert hasattr(marshal, "choose_guess")
         assert name not in FUGITIVE_AGENT_REGISTRY
+
+    for name in set(FUGITIVE_AGENT_REGISTRY) - common:
+        fugitive = FUGITIVE_AGENT_REGISTRY[name].create(7)
+        assert hasattr(fugitive, "choose_fugitive_action")
+        assert name not in MARSHAL_AGENT_REGISTRY
 
 
 def test_build_returns_complete_round_trippable_resolved_agent_specs() -> None:

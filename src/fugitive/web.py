@@ -75,6 +75,11 @@ from .reproducibility import (
     parse_seed,
     thaw_parameters,
 )
+from .rollout_diagnostics import (
+    RolloutDiagnosticFailure,
+    RolloutEvent,
+    read_rollout_diagnostics,
+)
 
 
 MODES = ("human_fugitive", "human_marshal", "spectate")
@@ -97,17 +102,24 @@ _LOGGER = logging.getLogger(__name__)
 _FUGITIVE_LABELS = {
     "hierarchical-random": "Hierarchical Legal Random (HR-1)",
     "belief-informed-random": "Belief-Informed Random (BIR-1)",
+    "continuation-count": "Continuation-Count Fugitive",
+    "belief-rollout": "Full-Game Belief Rollout Fugitive",
 }
 _MARSHAL_LABELS = {
     "hierarchical-random": "Hierarchical Legal Random (HR-1)",
     "belief-informed-random": "BIR-1 · Constructive Bootstrap Filter",
     "route-count-random": "Route-Count Random (HR-1.1)",
+    "support-catalogue-random": "Shared-Catalogue Support Random (HR-1C)",
+    "route-count-catalogue-random": (
+        "Shared-Catalogue Route-Count Random (HR-1.1C)"
+    ),
     "constructive-belief-informed-random": (
         "BIR-2S · Constructive SNIS · Sequential Sprint"
     ),
     "unweighted-constructive-belief-informed-random": (
         "BIR-2U · Constructive Unweighted · Sequential Sprint"
     ),
+    "rollout-bir2u": "BIR-2U Full-Game Rollout Marshal",
     "exact-sprint-belief-informed-random": (
         "BIR-2E · Constructive SNIS · Exact Sprint DP · very slow"
     ),
@@ -356,6 +368,10 @@ class GameSession:
         self._inference_events: list[InferenceEvent] = []
         self._inference_diagnostic_failures: list[
             InferenceDiagnosticFailure
+        ] = []
+        self._rollout_events: list[RolloutEvent] = []
+        self._rollout_diagnostic_failures: list[
+            RolloutDiagnosticFailure
         ] = []
         self._decision_count = 0
         self._decision_trace: list[DecisionRecord] = []
@@ -645,6 +661,28 @@ class GameSession:
         except Exception as diagnostics_error:
             self._inference_diagnostic_failures.append(
                 InferenceDiagnosticFailure.from_exception(
+                    decision=record.decision,
+                    round_number=record.round_number,
+                    phase=record.phase,
+                    role=record.role,
+                    error=diagnostics_error,
+                )
+            )
+        try:
+            rollout_diagnostics = read_rollout_diagnostics(acting_agent)
+            if rollout_diagnostics is not None:
+                self._rollout_events.append(
+                    RolloutEvent(
+                        decision=record.decision,
+                        round_number=record.round_number,
+                        phase=record.phase,
+                        role=record.role,
+                        diagnostics=rollout_diagnostics,
+                    )
+                )
+        except Exception as diagnostics_error:
+            self._rollout_diagnostic_failures.append(
+                RolloutDiagnosticFailure.from_exception(
                     decision=record.decision,
                     round_number=record.round_number,
                     phase=record.phase,
@@ -1049,6 +1087,13 @@ class GameSession:
                     failure.to_dict()
                     for failure in self._inference_diagnostic_failures
                 ],
+                "rollout_events": [
+                    event.to_dict() for event in self._rollout_events
+                ],
+                "rollout_diagnostic_failures": [
+                    failure.to_dict()
+                    for failure in self._rollout_diagnostic_failures
+                ],
                 "replay_manifest": replay,
                 "observations": {
                     "fugitive": observation_to_canonical_data(fugitive_view)[
@@ -1125,6 +1170,26 @@ class GameSession:
                 and self.spectator_view in ("omniscient", "marshal")
                 else []
             )
+            rollout_events = (
+                [
+                    event.to_dict()
+                    for event in self._rollout_events
+                    if self.spectator_view == "omniscient"
+                    or self.spectator_view == event.role.value
+                ]
+                if self.mode == "spectate"
+                else []
+            )
+            rollout_diagnostic_failures = (
+                [
+                    failure.to_dict()
+                    for failure in self._rollout_diagnostic_failures
+                    if self.spectator_view == "omniscient"
+                    or self.spectator_view == failure.role.value
+                ]
+                if self.mode == "spectate"
+                else []
+            )
             return {
                 "id": self.id,
                 "mode": self.mode,
@@ -1172,6 +1237,10 @@ class GameSession:
                 "inference_events": inference_events,
                 "inference_diagnostic_failures": (
                     inference_diagnostic_failures
+                ),
+                "rollout_events": rollout_events,
+                "rollout_diagnostic_failures": (
+                    rollout_diagnostic_failures
                 ),
                 "winner": winner,
                 "reason": reason,

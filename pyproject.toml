@@ -20,6 +20,8 @@ test = ["pytest>=8"]
 fugitive = "fugitive.web:main"
 fugitive-web = "fugitive.web:main"
 fugitive-tournament = "fugitive.tournament:main"
+fugitive-inference-benchmark = "fugitive.inference_benchmark:main"
+fugitive-psro = "fugitive.psro_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

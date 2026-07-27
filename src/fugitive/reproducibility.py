@@ -78,7 +78,7 @@ class SeedBundle:
 
 @dataclass(frozen=True, slots=True)
 class AgentDescriptor:
-    """Legacy manifest identity and constructor parameters for one policy."""
+    """Compact replay identity and constructor parameters for one policy."""
 
     name: str
     parameters: Mapping[str, FrozenJSONValue]

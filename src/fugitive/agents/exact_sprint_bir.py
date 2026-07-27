@@ -28,7 +28,7 @@ from .marshal_belief_policy import (
     DEFAULT_MAX_GUESS_CANDIDATES,
     BeliefInformedMarshalActionPolicy,
     ComposedBeliefInformedRandomMarshalAgent,
-    _marshal_rng_and_belief_salt,
+    marshal_rng_and_belief_salt,
 )
 from .constructive_bir import (
     BIR2_WEIGHTING_ID,
@@ -85,7 +85,7 @@ class ExactSprintBeliefInformedRandomMarshalAgent(
         manhunt_alpha: float = DEFAULT_MANHUNT_ALPHA,
         _sampler: ConstructiveWorldSampler | None = None,
     ) -> None:
-        policy_rng, belief_salt = _marshal_rng_and_belief_salt(seed, rng)
+        policy_rng, belief_salt = marshal_rng_and_belief_salt(seed, rng)
         sampler = _sampler or ConstructiveWorldSampler(
             sprint_backend=EXACT_SPRINT_BACKEND
         )

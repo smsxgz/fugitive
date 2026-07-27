@@ -13,7 +13,7 @@ from enum import Enum
 import hashlib
 import json
 import math
-from typing import Any, Mapping, cast
+from typing import Any, Callable, Mapping, TypeAlias, cast
 
 from .agents.registry import FUGITIVE_AGENT_REGISTRY, MARSHAL_AGENT_REGISTRY
 from .driver import (
@@ -47,6 +47,11 @@ from .reproducibility import (
     derive_seed_bundle,
     normalize_parameters as _normalize_parameters,
 )
+from .rollout_diagnostics import (
+    RolloutDiagnosticFailure,
+    RolloutEvent,
+    read_rollout_diagnostics,
+)
 
 
 MANIFEST_SCHEMA_VERSION = 1
@@ -54,6 +59,9 @@ RULES_VERSION = "fugitive-canonical-2026-07-23-v1"
 # SHA-256 of docs/rules/CANONICAL_RULES.md after normalizing CRLF to LF.  A
 # rules-text change must update both this fingerprint and RULES_VERSION.
 RULES_SHA256 = "027b6c902e372bc0f385c1aa899ff1b6265b559342bf45db5550cf81709085b3"
+
+
+ReplayInspectionCallback: TypeAlias = Callable[[GameEngine, DecisionRecord], None]
 
 
 class ExperimentStatus(str, Enum):
@@ -231,6 +239,8 @@ class ExperimentRun:
     game_result: GameResult | None
     inference_events: tuple[InferenceEvent, ...] = ()
     inference_diagnostic_failures: tuple[InferenceDiagnosticFailure, ...] = ()
+    rollout_events: tuple[RolloutEvent, ...] = ()
+    rollout_diagnostic_failures: tuple[RolloutDiagnosticFailure, ...] = ()
 
     @property
     def status(self) -> ExperimentStatus:
@@ -326,6 +336,8 @@ def run_experiment(
     trace: list[DecisionRecord] = []
     inference_events: list[InferenceEvent] = []
     inference_diagnostic_failures: list[InferenceDiagnosticFailure] = []
+    rollout_events: list[RolloutEvent] = []
+    rollout_diagnostic_failures: list[RolloutDiagnosticFailure] = []
     error: RunError | None = None
     status: ExperimentStatus | None = None
 
@@ -379,6 +391,29 @@ def run_experiment(
                         error=diagnostics_error,
                     )
                 )
+            stage = "collect_rollout_diagnostics"
+            try:
+                rollout_diagnostics = read_rollout_diagnostics(acting_agent)
+                if rollout_diagnostics is not None:
+                    rollout_events.append(
+                        RolloutEvent(
+                            decision=record.decision,
+                            round_number=record.round_number,
+                            phase=record.phase,
+                            role=record.role,
+                            diagnostics=rollout_diagnostics,
+                        )
+                    )
+            except Exception as diagnostics_error:
+                rollout_diagnostic_failures.append(
+                    RolloutDiagnosticFailure.from_exception(
+                        decision=record.decision,
+                        round_number=record.round_number,
+                        phase=record.phase,
+                        role=record.role,
+                        error=diagnostics_error,
+                    )
+                )
             if validate_invariants:
                 stage = "validate_invariants"
                 engine.validate_invariants()
@@ -411,10 +446,12 @@ def run_experiment(
         error=error,
     )
     return ExperimentRun(
-        manifest,
-        game_result,
-        tuple(inference_events),
-        tuple(inference_diagnostic_failures),
+        manifest=manifest,
+        game_result=game_result,
+        inference_events=tuple(inference_events),
+        inference_diagnostic_failures=tuple(inference_diagnostic_failures),
+        rollout_events=tuple(rollout_events),
+        rollout_diagnostic_failures=tuple(rollout_diagnostic_failures),
     )
 
 
@@ -422,8 +459,16 @@ def replay_manifest(
     manifest: ReplayManifest,
     *,
     validate_invariants: bool = True,
+    inspect_before_decision: ReplayInspectionCallback | None = None,
 ) -> ReplayVerification:
-    """Replay and strictly verify every recorded action and outcome."""
+    """Replay and strictly verify every recorded action and outcome.
+
+    ``inspect_before_decision`` is an offline, read-only inspection hook.  It is
+    called after the recorded phase and round have been checked, immediately
+    before that decision is applied.  The callback must not mutate the engine.
+    It exists so audit tooling can take immutable snapshots without changing
+    the agent-facing observation API or the replay manifest schema.
+    """
 
     if manifest.schema_version != MANIFEST_SCHEMA_VERSION:
         raise ReplayMismatchError(
@@ -471,6 +516,8 @@ def replay_manifest(
                     raise ReplayMismatchError(
                         f"decision {record.decision}: draw role does not match phase"
                     )
+                if inspect_before_decision is not None:
+                    inspect_before_decision(engine, record)
                 card = engine.draw(record.pile)
                 if card != record.card:
                     raise ReplayMismatchError(
@@ -482,6 +529,8 @@ def replay_manifest(
                     raise ReplayMismatchError(
                         f"decision {record.decision}: invalid Fugitive action role"
                     )
+                if inspect_before_decision is not None:
+                    inspect_before_decision(engine, record)
                 engine.apply_fugitive_action(
                     FugitiveAction(record.hideout, record.sprint_cards)
                 )
@@ -490,6 +539,8 @@ def replay_manifest(
                     raise ReplayMismatchError(
                         f"decision {record.decision}: invalid guess role"
                     )
+                if inspect_before_decision is not None:
+                    inspect_before_decision(engine, record)
                 success = engine.apply_guess(record.numbers)
                 if success is not record.success:
                     raise ReplayMismatchError(
@@ -831,6 +882,7 @@ __all__ = [
     "MANIFEST_SCHEMA_VERSION",
     "RULES_SHA256",
     "RULES_VERSION",
+    "ReplayInspectionCallback",
     "ReplayManifest",
     "ReplayMismatchError",
     "ReplayVerification",
