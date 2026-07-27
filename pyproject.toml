@@ -17,19 +17,17 @@ dependencies = []
 test = ["pytest>=8"]
 
 [project.scripts]
-fugitive = "fugitive.web:main"
-fugitive-web = "fugitive.web:main"
-fugitive-tournament = "fugitive.tournament:main"
-fugitive-inference-benchmark = "fugitive.inference_benchmark:main"
-fugitive-psro = "fugitive.psro_cli:main"
+fugitive = "fugitive.web.server:main"
+fugitive-web = "fugitive.web.server:main"
+fugitive-psro = "fugitive.psro.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-fugitive = ["web_static/*"]
+"fugitive.web" = ["static/*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]

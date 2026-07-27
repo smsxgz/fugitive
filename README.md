@@ -38,6 +38,19 @@ fugitive-web --host 127.0.0.1 --port 8000
 
 然后打开 <http://127.0.0.1:8000>。
 
+交互式探索可使用少量稳定的快捷导入；实现代码仍应从概念所属模块显式导入：
+
+```python
+from fugitive import GameEngine, Role
+from fugitive.agents import (
+    FUGITIVE_AGENT_REGISTRY,
+    HierarchicalRandomFugitiveAgent,
+    HierarchicalRandomMarshalAgent,
+)
+```
+
+`fugitive.agents` 只重导出 registry、HR 和 BIR-1 这些高频入口。进阶 Agent 仍从各自实现模块导入，内部代码也保持显式依赖。
+
 界面支持：
 
 - 人类扮演 Fugitive，对战 Marshal Agent；
@@ -81,7 +94,7 @@ fugitive-web --host 127.0.0.1 --port 8000
 pi_i(action | I_i)
 ```
 
-引擎只把不可变的 [`Observation`](src/fugitive/model.py) 交给 Agent，不会传入真实牌堆顺序或对手私有状态。
+引擎只把不可变的 [`Observation`](src/fugitive/game/model.py) 交给 Agent，不会传入真实牌堆顺序或对手私有状态。
 
 | 信息 | Fugitive | Marshal |
 | --- | --- | --- |
@@ -96,7 +109,7 @@ pi_i(action | I_i)
 
 Agent 只选择从哪个牌堆摸牌；具体抽到哪张牌由引擎的隐藏牌序决定。全知观战只存在于 Web 序列化层，不会成为 Agent 输入。
 
-Constructive inference 从 [`CompiledMarshalConstraints`](src/fugitive/inference/constraints.py) 开始只消费 Marshal Observation。测试还包含 observation non-interference、不同观战视角脱敏和私有状态替换检查。
+Constructive inference 从 [`CompiledMarshalConstraints`](src/fugitive/agents/marshal/inference/constructive/constraints.py) 开始只消费 Marshal Observation。测试还包含 observation non-interference、不同观战视角脱敏和私有状态替换检查。
 
 这是一条数据/API 隔离边界，不是针对恶意 Python Agent 的进程安全沙箱。
 
@@ -134,25 +147,25 @@ C(S) = |S| + 0.5 * overpay(S) + 0.75 * future_cards(S)
 
 | Registry ID | 名称 | 核心思想 | 实现 |
 | --- | --- | --- | --- |
-| `hierarchical-random` | HR-1 | 分层合法随机 | [hierarchical_random.py](src/fugitive/agents/hierarchical_random.py) |
-| `belief-informed-random` | BIR-1 Fugitive | 信息集启发式 + epsilon-softmax | [bir_fugitive.py](src/fugitive/agents/bir_fugitive.py) |
-| `continuation-count` | Continuation Count | 有限深度续着数 + 公开隐蔽性 | [continuation_count_fugitive.py](src/fugitive/agents/continuation_count_fugitive.py) |
-| `belief-rollout` | Belief Rollout | 采样 Marshal 手牌并模拟到终局 | [belief_rollout_fugitive.py](src/fugitive/agents/belief_rollout_fugitive.py) |
+| `hierarchical-random` | HR-1 | 分层合法随机 | [hierarchical_random.py](src/fugitive/agents/fugitive/hierarchical_random.py) |
+| `belief-informed-random` | BIR-1 Fugitive | 信息集启发式 + epsilon-softmax | [bir.py](src/fugitive/agents/fugitive/bir.py) |
+| `continuation-count` | Continuation Count | 有限深度续着数 + 公开隐蔽性 | [continuation_count.py](src/fugitive/agents/fugitive/continuation_count.py) |
+| `belief-rollout` | Belief Rollout | 采样 Marshal 手牌并模拟到终局 | [belief_rollout.py](src/fugitive/agents/fugitive/belief_rollout.py) |
 
 ### Marshal
 
 | Registry ID | 名称 | Belief/更新方式 | 实现 |
 | --- | --- | --- | --- |
-| `hierarchical-random` | HR-1 | hard route support | [hierarchical_random.py](src/fugitive/agents/hierarchical_random.py) |
-| `route-count-random` | HR-1.1 | exact compatible-route counts | [route_count_random.py](src/fugitive/agents/route_count_random.py) |
-| `support-catalogue-random` | HR-1C | 共享候选集上的 Boolean support | [support_catalogue_random.py](src/fugitive/agents/support_catalogue_random.py) |
-| `route-count-catalogue-random` | HR-1.1C | 同一候选集上的 route-count weight | [route_count_catalogue_random.py](src/fugitive/agents/route_count_catalogue_random.py) |
-| `belief-informed-random` | BIR-1 | constructive bootstrap particle filter | [bootstrap_bir.py](src/fugitive/agents/bootstrap_bir.py) |
-| `unweighted-constructive-belief-informed-random` | BIR-2U | observation-local unweighted constructive samples | [unweighted_constructive_bir.py](src/fugitive/agents/unweighted_constructive_bir.py) |
-| `rollout-bir2u` | Rollout BIR-2U | BIR-2U 根 belief + 完整终局 rollout | [rollout_bir2u_marshal.py](src/fugitive/agents/rollout_bir2u_marshal.py) |
-| `constructive-belief-informed-random` | BIR-2S | observation-local constructive SNIS | [constructive_bir.py](src/fugitive/agents/constructive_bir.py) |
-| `exact-sprint-belief-informed-random` | BIR-2E | exact Sprint DP reference + SNIS | [exact_sprint_bir.py](src/fugitive/agents/exact_sprint_bir.py) |
-| `mcmc-belief-informed-random` | BIR-3 | SIR + finite-step independent MH | [mcmc_bir.py](src/fugitive/agents/mcmc_bir.py) |
+| `hierarchical-random` | HR-1 | hard route support | [hierarchical_random.py](src/fugitive/agents/marshal/hierarchical_random.py) |
+| `route-count-random` | HR-1.1 | exact compatible-route counts | [route_count.py](src/fugitive/agents/marshal/route_count.py) |
+| `support-catalogue-random` | HR-1C | 共享候选集上的 Boolean support | [support_catalogue.py](src/fugitive/agents/marshal/support_catalogue.py) |
+| `route-count-catalogue-random` | HR-1.1C | 同一候选集上的 route-count weight | [route_count_catalogue.py](src/fugitive/agents/marshal/route_count_catalogue.py) |
+| `belief-informed-random` | BIR-1 | constructive bootstrap particle filter | [bootstrap.py](src/fugitive/agents/marshal/bir/bootstrap.py) |
+| `unweighted-constructive-belief-informed-random` | BIR-2U | observation-local unweighted constructive samples | [unweighted.py](src/fugitive/agents/marshal/bir/unweighted.py) |
+| `rollout-bir2u` | Rollout BIR-2U | BIR-2U 根 belief + 完整终局 rollout | [rollout_bir2u.py](src/fugitive/agents/marshal/rollout_bir2u.py) |
+| `constructive-belief-informed-random` | BIR-2S | observation-local constructive SNIS | [snis.py](src/fugitive/agents/marshal/bir/snis.py) |
+| `exact-sprint-belief-informed-random` | BIR-2E | exact Sprint DP reference + SNIS | [exact_sprint.py](src/fugitive/agents/marshal/bir/exact_sprint.py) |
+| `mcmc-belief-informed-random` | BIR-3 | SIR + finite-step independent MH | [mcmc.py](src/fugitive/agents/marshal/bir/mcmc.py) |
 
 `belief-informed-random` 在 Fugitive 和 Marshal registry 中分别指两个不同实现。前者是可见信息上的 Fugitive 启发式策略；后者是 Marshal constructive bootstrap filter。
 
@@ -215,7 +228,7 @@ Manhunt 生存值通过逐猜 rollout 估计：模拟 Marshal 猜中后揭示对
 
 ### PathBelief
 
-[`PathBelief`](src/fugitive/belief.py) 用动态规划计数严格递增、与 Marshal 公开信息相容的 Hideout 数值路线。它处理：
+[`PathBelief`](src/fugitive/agents/marshal/inference/path_belief.py) 用动态规划计数严格递增、与 Marshal 公开信息相容的 Hideout 数值路线。它处理：
 
 - 已揭示 Hideout；
 - Marshal 手牌和公开牌造成的排除；
@@ -262,7 +275,7 @@ P(n) proportional to count(n)^alpha
 - `support-catalogue-random` (HR-1C)；
 - `route-count-catalogue-random` (HR-1.1C)。
 
-两者都调用 [`build_marshal_guess_catalogue`](src/fugitive/agents/marshal_candidates.py)，共享单猜、pair/triple 候选、候选上限、猜测规模先验和 observation-derived 随机域；唯一核心差异是支持集等权还是按 compatible-route count 加权。因此 HR-1C 与 HR-1.1C 才直接回答：
+两者都调用 [`build_marshal_guess_catalogue`](src/fugitive/agents/marshal/candidates.py)，共享单猜、pair/triple 候选、候选上限、猜测规模先验和 observation-derived 随机域；唯一核心差异是支持集等权还是按 compatible-route count 加权。因此 HR-1C 与 HR-1.1C 才直接回答：
 
 > 只知道“可能/不可能”是否足够，还是 route completion mass 能显著改善猜测？
 
@@ -270,7 +283,7 @@ HR-1.1 仍然只是 route-count model，不是 complete-world posterior。
 
 ## Marshal BIR 的共享动作策略
 
-BIR-1、BIR-2U、BIR-2S、BIR-2E 和 BIR-3 共享 [`BeliefInformedMarshalActionPolicy`](src/fugitive/agents/marshal_belief_policy.py)。不同 Agent 主要替换 belief backend，而不复制猜测策略。
+BIR-1、BIR-2U、BIR-2S、BIR-2E 和 BIR-3 共享 [`BeliefInformedMarshalActionPolicy`](src/fugitive/agents/marshal/action_policy.py)。不同 Agent 主要替换 belief backend，而不复制猜测策略。
 
 共享策略包括：
 
@@ -309,7 +322,7 @@ Q(G) = |G| * P(success)
 - Fugitive 的隐藏抽牌序列；
 - 三个剩余牌堆。
 
-[`ConstructiveWorldSampler`](src/fugitive/inference/constructive_sampler.py) 按以下阶段构造世界：
+[`ConstructiveWorldSampler`](src/fugitive/agents/marshal/inference/constructive/sampler.py) 按以下阶段构造世界：
 
 1. 从 Marshal Observation 编译公开约束；
 2. 用 `PathBelief` catalogue 抽取一条相容 Hideout 路线；
@@ -519,16 +532,14 @@ BIR-1 的 fresh/reset、BIR-2U 和 BIR-2S 故意共享 sequential domain，以�
 
 ## 可复现实验与 replay
 
-推荐通过 registry 运行实验：
+`runtime.runner` 提供两个单局入口：已有 Agent 实例使用 `run_match`，registry 名称与参数使用 `run_registered_match`。两者都返回 `MatchRun`；其 `MatchStatus` 明确区分规则终局、显式 watchdog 截断和执行错误。推荐批量研究从 registry 入口开始：
 
 ```python
-from fugitive.experiment import (
-    ReplayManifest,
-    replay_manifest,
-    run_registered_experiment,
-)
+from fugitive.runtime.manifest import ReplayManifest
+from fugitive.runtime.replay import replay_manifest
+from fugitive.runtime.runner import run_registered_match
 
-run = run_registered_experiment(
+run = run_registered_match(
     master_seed=123,
     fugitive_name="hierarchical-random",
     marshal_name="route-count-random",
@@ -564,10 +575,10 @@ Replay 会逐步重放并验证动作、规则指纹、结果和最终状态，�
 
 Web 导出的完整 trace 包含双方私有牌、完整动作和派生 seeds，应把它视为研究数据，而不是可公开分享的单方观战日志。
 
-批量比较使用同一套单局 runner，因此 Agent 配置、seed 派生、错误记录、manifest 和 replay 协议不会另写一套：
+批量比较使用同一套单局 runner，因此 Agent 配置、seed 派生、错误记录、manifest 和 replay 协议不会另写一套。以下研究命令需在仓库根目录运行；`experiments` 有意不作为可安装核心包或 console script 发布：
 
 ```powershell
-fugitive-tournament `
+python -m experiments.tournament `
   --fugitive hierarchical-random `
   --fugitive belief-informed-random `
   --marshal hierarchical-random `
@@ -582,7 +593,7 @@ fugitive-tournament `
 中断后可以续跑，也可以把每个 matchup 的目标局数从较小的校准值增加到较大值：
 
 ```powershell
-fugitive-tournament `
+python -m experiments.tournament `
   --fugitive hierarchical-random `
   --fugitive belief-informed-random `
   --marshal hierarchical-random `
@@ -597,7 +608,7 @@ fugitive-tournament `
 
 ## PSRO 经验策略搜索
 
-[`psro.py`](src/fugitive/psro.py) 实现角色分离的完整 Policy-Space Response Oracles 循环：
+[`algorithm.py`](src/fugitive/psro/algorithm.py) 实现角色分离的完整 Policy-Space Response Oracles 循环：
 
 ```text
 策略群体
@@ -611,7 +622,7 @@ fugitive-tournament `
 
 经验矩阵统一使用 Marshal 胜率，因此 Marshal 最大化、Fugitive 最小化。内置 meta-solver 是 simultaneous multiplicative weights；它报告当前受限矩阵内的 lower/upper bound、双侧 response residual 和 duality gap。这些是 restricted-game diagnostics，不是完整游戏 exploitability。
 
-[`psro_policy_adapter.py`](src/fugitive/psro_policy_adapter.py) 把通用核心连接到 registry；[`psro_payoff.py`](src/fugitive/psro_payoff.py) 负责完整对局收益、validation 和 holdout；[`psro_experiment.py`](src/fugitive/psro_experiment.py) 只编排 checkpoint 与迭代。每个 pure policy 保存一次真实执行 `AgentSpec` 和一次声明的 non-search planning leaf。search response 在 checkpoint 中只引用对手 `policy_id + weight`；运行 payoff game 时再从当前 `PolicyPopulation` repository 解析 leaf specs。顶层 search 的 planning depth 固定为 1：如果 rollout 选中另一个 search policy，只执行后者声明的 leaf，不会递归启动第二层 rollout。
+[`policy_adapter.py`](src/fugitive/psro/policy_adapter.py) 把通用核心连接到 registry；[`payoff.py`](src/fugitive/psro/payoff.py) 负责完整对局收益、validation 和 holdout；[`runner.py`](src/fugitive/psro/runner.py) 编排 checkpoint 与迭代。每个 pure policy 保存一次真实执行 `AgentSpec` 和一次声明的 non-search planning leaf。search response 在 checkpoint 中只引用对手 `policy_id + weight`；运行 payoff game 时再从当前 `PolicyPopulation` repository 解析 leaf specs。顶层 search 的 planning depth 固定为 1：如果 rollout 选中另一个 search policy，只执行后者声明的 leaf，不会递归启动第二层 rollout。
 
 默认 response candidates 是便宜的 `continuation-count` Fugitive 和 BIR-2U Marshal，默认 population 不含这两个候选。它们不读取当前 opponent mixture，所以默认运行是一次经过验证的 population augmentation：候选被接纳或拒绝后，下一代通常没有新的不同 policy。要研究真正随 mixture 变化的多代 response，可显式使用 `belief-rollout` / `rollout-bir2u`；它们会读取冻结的 opponent leaf mixture，但计算成本也高得多。
 
@@ -672,7 +683,7 @@ Invoke-RestMethod -Method Post `
 引擎是游戏合法性的权威。对于手工构造 Marshal Observation 的教学实验，可以额外使用轻量契约检查：
 
 ```python
-from fugitive.observation_validation import (
+from fugitive.agents.marshal.inference.observation_validation import (
     validate_marshal_observation_contract,
 )
 
@@ -691,10 +702,10 @@ validate_marshal_observation_contract(marshal_observation)
 
 ### 固定 Observation inference benchmark
 
-直接比较不同 BIR 对局胜率会同时混入 belief 质量、动作策略和随机牌局。`fugitive-inference-benchmark` 会重放同一批 manifest，在每个 Marshal 决策前截取完全相同的 Observation，然后分别运行 BIR-1/2U/2S/2E/3 backend：
+直接比较不同 BIR 对局胜率会同时混入 belief 质量、动作策略和随机牌局。`experiments.behavior` 会重放同一批 manifest，在每个 Marshal 决策前截取完全相同的 Observation，然后分别运行 BIR-1/2U/2S/2E/3 backend：
 
 ```powershell
-fugitive-inference-benchmark `
+python -m experiments.behavior `
   experiment_runs/reference/manifests/game-000001.json `
   --agent BIR-1 `
   --agent BIR-2U `
@@ -714,66 +725,56 @@ fugitive-inference-benchmark `
 
 ```text
 src/fugitive/
-  engine.py                       # 完整规则状态机
-  rules.py                        # Sprint 与合法动作规则
-  model.py                        # Observation、Action、Result 数据结构
-  belief.py                       # PathBelief route DP/count/sampling
-
+  game/                           # 规则、状态机、Observation 与动作执行
+    model.py
+    rules.py
+    engine.py
+    driver.py
+    observation.py
   agents/
-    hierarchical_random.py       # HR-1 Fugitive/Marshal
-    route_count_random.py        # HR-1.1 Marshal
-    marshal_candidates.py        # 受控 HR 共享猜测 catalogue
-    support_catalogue_random.py  # HR-1C
-    route_count_catalogue_random.py # HR-1.1C
-    bir_fugitive.py              # BIR Fugitive heuristic
-    continuation_count_fugitive.py # 续着数/隐蔽性 Fugitive
-    belief_rollout_fugitive.py   # Fugitive full-game rollout
-    marshal_belief_policy.py     # 所有 Marshal BIR 共用的动作策略
-    bootstrap_bir.py             # BIR-1 backend + agent
-    unweighted_constructive_bir.py # BIR-2U
-    constructive_bir.py          # BIR-2S
-    exact_sprint_bir.py          # BIR-2E
-    mcmc_bir.py                  # BIR-3
-    rollout_bir2u_marshal.py     # Marshal full-game rollout
-    policy_mixture.py            # 可重放的 opponent meta-mixture
-    registry.py                  # 可复现参数与算法元数据
+    common/                       # 双方 baseline 共用的分布与动作工具
+    planning/                     # determinization、rollout、策略混合
+    fugitive/                     # Fugitive 各策略，一种算法一个文件
+    marshal/                      # Marshal 各策略及共享候选/动作策略
+      bir/                        # BIR-1、2U、2S、2E、3 Agent
+      inference/                  # Marshal 隐藏世界推断
+        constructive/             # 约束、proposal、target、Sprint DP
+        particles/                # bootstrap 与 batch-to-belief
+    registry.py                  # 显式、可复现 Agent 配置
+  runtime/
+    manifest.py                  # MatchRun/MatchStatus 与 replay manifest
+    runner.py                    # 单局 run_match/run_registered_match
+    replay.py                    # 确定性轨迹重放
+  psro/                          # 作为核心算法保留在安装包中
+    population.py                # pure-policy population
+    payoff_matrix.py             # 经验收益矩阵
+    solver.py                    # restricted-game meta solver
+    algorithm.py                 # PSRO 迭代
+    payoff.py                    # 完整对局收益与 holdout
+    runner.py                    # checkpointed experiment orchestration
+    cli.py                       # fugitive-psro 入口
+  web/
+    session.py                   # 会话、视角与序列化
+    server.py                    # HTTP API 与 CLI
+    static/                      # 浏览器界面
+  shared/
+    reproducibility.py           # seed 与 AgentSpec 协议
 
-  inference/
-    constraints.py               # Observation -> constructive constraints
-    constructive_sampler.py      # complete-world proposal pipeline
-    draw_matching.py             # draw deadline matching
-    sprint_constraints.py        # Sprint 共享约束模型
-    sprint_sequential.py         # 快速 sequential proposal
-    sprint_exact.py              # exact descendant-count reference DP
-    worlds.py                    # complete world、target、sample report
-
-  particle_inference/
-    state.py                     # particle/world belief 数据与统计
-    constructive_fresh.py        # BIR-1/2 共用 batch-to-belief 构造
-    bootstrap_filter.py          # BIR-1 incremental update/resampling
-
-  inference_diagnostics.py       # 跨 backend 可比较诊断
-  observation_validation.py      # 轻量 Observation 契约
-  world_validation.py            # complete-world 一致性
-  reproducibility.py             # seed 与 AgentSpec 协议
-  determinization.py             # 双侧 information-safe 世界重建
-  rollout.py                     # common-random-number 终局模拟
-  rollout_diagnostics.py         # paired rollout 结果与工作量 side channel
-  experiment.py                  # 完整对局、manifest 与 replay
-  observation_benchmark.py       # 固定 Observation 评分 primitives
-  inference_benchmark.py         # inference benchmark CLI
-  psro.py                        # 通用零和 PSRO 核心
-  psro_policy_adapter.py         # registry policy 与 response 适配
-  psro_payoff.py                 # full-game payoff、validation 与 holdout
-  psro_experiment.py             # checkpoint 与迭代编排
-  planning_leaf.py               # search policy -> non-search leaf 投影
-  payoff_ledger.py               # append-only per-game PSRO 收益记录
-  tournament.py                  # 配对、断点续跑的批量实验
-  web.py                         # 本地 Web API/session
-  web_static/                    # 浏览器界面
+experiments/                     # 不属于安装包的研究/分析入口
+  tournament/                    # 配对批量对局、报告、CLI
+    model.py
+    runner.py
+    reporting.py
+    cli.py
+  behavior/                      # 固定 Observation 推断比较
+    benchmark.py
+    metrics.py
+    cli.py
 ```
 
-不同 BIR Agent 分别位于独立文件，共享动作策略和 inference primitives 通过组合注入，而不是通过继承关闭无关父类状态。
+依赖方向保持单向：`game` 不依赖 Agent；`agents` 只依赖 `game/shared`；`runtime` 组合引擎与 Agent；`psro` 在 `agents/runtime` 之上实现核心策略搜索；`web` 与仓库外层的 `experiments` 都是调用层。外层实验代码不进入 wheel，也不反向成为 Agent 或规则引擎的依赖。
+
+不同角色和不同 BIR Agent 分别位于独立文件。双方通用的 baseline 工具放在 `agents/common`，搜索共用件放在 `agents/planning`，而 Marshal 专属的 belief machinery 归 `agents/marshal/inference` 所有。共享动作策略和 inference primitives 通过组合注入，而不是通过继承关闭无关父类状态。
 
 ## 测试
 
@@ -786,16 +787,16 @@ python -m pytest
 常用定向测试：
 
 ```powershell
-python -m pytest tests/test_engine.py
-python -m pytest tests/test_observation_validation.py
-python -m pytest tests/test_unweighted_constructive_bir.py
-python -m pytest tests/test_exact_sprint_bir.py
-python -m pytest tests/test_mcmc_bir.py
-python -m pytest tests/test_rollout.py
-python -m pytest tests/test_observation_benchmark.py
-python -m pytest tests/test_psro.py
-python -m pytest tests/test_reproducibility_integration.py
-python -m pytest tests/test_web.py
+python -m pytest tests/game/test_engine.py
+python -m pytest tests/agents/marshal/test_observation_validation.py
+python -m pytest tests/agents/marshal/test_unweighted_constructive_bir.py
+python -m pytest tests/agents/marshal/test_exact_sprint_bir.py
+python -m pytest tests/agents/marshal/test_mcmc_bir.py
+python -m pytest tests/agents/common/test_rollout.py
+python -m pytest tests/experiments/test_observation_benchmark.py
+python -m pytest tests/psro/test_psro.py
+python -m pytest tests/runtime/test_reproducibility_integration.py
+python -m pytest tests/web/test_web.py
 ```
 
 当前测试覆盖：
@@ -813,8 +814,8 @@ python -m pytest tests/test_web.py
 - 双侧 determinization、私有信息隔离、common random numbers 和终局 rollout；
 - 固定 Observation proper scores、route coverage 与 joint calibration；
 - 固定 Observation 多 replicate、跨 backend common comparison seed 与 U/S 同 proposals；
-- PSRO 缺失格增量评估、meta-solver residual、双侧 response 和 checkpoint round trip；
-- PSRO policy-ID leaf materialization、非递归 search、逐局 ledger 恢复和多进程 payoff；
+- PSRO 缺失格增量评估、restricted equilibrium、双侧 response 和 checkpoint resume；
+- PSRO policy-ID leaf materialization、非递归 search、逐局 ledger、paired payoff、response validation 与 holdout；
 - seed domain separation、manifest replay 和 Web 64-bit seed round trip；
 - reviewer 发现的合法 Manhunt long-tail 状态回归。
 

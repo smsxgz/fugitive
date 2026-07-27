@@ -10,32 +10,32 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Generic, Mapping, TypeVar, cast
 
-from fugitive.model import FugitiveAgent, MarshalAgent, Role
-from fugitive.particle_belief import (
+from fugitive.game.model import FugitiveAgent, MarshalAgent, Role
+from fugitive.agents.marshal.inference.particle_belief import (
     BIR1_INCREMENTAL_EXACT_COMBINATION_THRESHOLD,
     BIR1_INCREMENTAL_PLAY_PROPOSAL_LIMIT,
     BIR1_RESAMPLE_ESS_FRACTION,
     DEFAULT_PARTICLE_COUNT,
 )
-from fugitive.reproducibility import (
+from fugitive.shared.reproducibility import (
     AGENT_PROFILES,
     AgentSpec,
     normalize_parameters,
     validate_seed,
 )
 
-from .bir_common import (
+from .common.bir_common import (
     DEFAULT_EPSILON as DEFAULT_BIR_EPSILON,
     DEFAULT_MANHUNT_ALPHA,
     DEFAULT_MANHUNT_EPSILON,
     DEFAULT_TEMPERATURE,
 )
-from .bir_fugitive import (
+from .fugitive.bir import (
     BIR1_FUGITIVE_ALGORITHM_ID,
     BeliefInformedRandomFugitiveAgent,
     DEFAULT_MANHUNT_ROLLOUTS,
 )
-from .belief_rollout_fugitive import (
+from .fugitive.belief_rollout import (
     BELIEF_ROLLOUT_FUGITIVE_ALGORITHM_ID,
     DEFAULT_MAX_TERMINAL_SIMULATIONS as DEFAULT_FUGITIVE_ROLLOUT_BUDGET,
     DEFAULT_ROLLOUT_CANDIDATE_COUNT as DEFAULT_FUGITIVE_ROLLOUT_CANDIDATES,
@@ -44,7 +44,7 @@ from .belief_rollout_fugitive import (
     ROLLOUT_MODEL_ID as FUGITIVE_ROLLOUT_MODEL_ID,
     BeliefRolloutFugitiveAgent,
 )
-from .bootstrap_bir import (
+from .marshal.bir.bootstrap import (
     BIR1_BOOTSTRAP_BACKEND_ID,
     BIR1_BELIEF_SEED_DOMAIN,
     BIR1_INCREMENTAL_TRANSITION_ID,
@@ -55,10 +55,10 @@ from .bootstrap_bir import (
     BIR1_WEIGHTING_ID,
     BeliefInformedRandomMarshalAgent,
 )
-from .marshal_belief_policy import (
+from .marshal.action_policy import (
     DEFAULT_MAX_GUESS_CANDIDATES,
 )
-from .constructive_bir import (
+from .marshal.bir.snis import (
     BIR2S_ALGORITHM_ID,
     BIR2_BELIEF_SEED_DOMAIN,
     BIR2_PROPOSAL_KERNEL_ID,
@@ -67,7 +67,7 @@ from .constructive_bir import (
     CONSTRUCTIVE_SPRINT_BACKEND,
     ConstructiveBeliefInformedRandomMarshalAgent,
 )
-from .continuation_count_fugitive import (
+from .fugitive.continuation_count import (
     CATCH_RISK_FEATURE_ID,
     CONCEALMENT_FEATURE_ID,
     CONTINUATION_CACHE_ID,
@@ -81,7 +81,7 @@ from .continuation_count_fugitive import (
     ContinuationCountFugitiveAgent,
     PUBLIC_TIMELINE_ID,
 )
-from .exact_sprint_bir import (
+from .marshal.bir.exact_sprint import (
     DEFAULT_EXACT_SPRINT_PARTICLE_COUNT,
     EXACT_SPRINT_ALGORITHM_ID,
     EXACT_SPRINT_BACKEND,
@@ -90,19 +90,21 @@ from .exact_sprint_bir import (
     EXACT_SPRINT_REFERENCE_TARGET_ID,
     ExactSprintBeliefInformedRandomMarshalAgent,
 )
-from .hierarchical_random import (
+from .fugitive.hierarchical_random import (
     DEFAULT_MAX_EXTRA_OVERPAYMENTS,
-    DEFAULT_MAX_GUESSES_PER_SIZE,
-    DEFAULT_MAX_GUESS_SIZE as DEFAULT_HR_MAX_GUESS_SIZE,
     DEFAULT_MAX_LOW_COST_PAYMENTS,
-    DEFAULT_MULTI_GUESS_CONTINUATION as DEFAULT_HR_MULTI_GUESS_CONTINUATION,
     DEFAULT_OVERPAY_PROBABILITY,
     HR1_FUGITIVE_ALGORITHM_ID,
-    HR1_MARSHAL_ALGORITHM_ID,
     HierarchicalRandomFugitiveAgent,
+)
+from .marshal.hierarchical_random import (
+    DEFAULT_MAX_GUESSES_PER_SIZE,
+    DEFAULT_MAX_GUESS_SIZE as DEFAULT_HR_MAX_GUESS_SIZE,
+    DEFAULT_MULTI_GUESS_CONTINUATION as DEFAULT_HR_MULTI_GUESS_CONTINUATION,
+    HR1_MARSHAL_ALGORITHM_ID,
     HierarchicalRandomMarshalAgent,
 )
-from .mcmc_bir import (
+from .marshal.bir.mcmc import (
     BIR3_ALGORITHM_ID,
     BIR3_INITIAL_SEED_DOMAIN,
     BIR3_INITIAL_WEIGHTING_ID,
@@ -113,7 +115,7 @@ from .mcmc_bir import (
     DEFAULT_MH_STEPS_PER_CHAIN,
     MCMCBeliefInformedRandomMarshalAgent,
 )
-from .route_count_random import (
+from .marshal.route_count import (
     DEFAULT_ALPHA as DEFAULT_ROUTE_COUNT_ALPHA,
     DEFAULT_EPSILON as DEFAULT_ROUTE_COUNT_EPSILON,
     DEFAULT_MAX_GUESS_SIZE as DEFAULT_ROUTE_COUNT_MAX_GUESS_SIZE,
@@ -122,7 +124,7 @@ from .route_count_random import (
     HR11_MARSHAL_ALGORITHM_ID,
     RouteCountRandomMarshalAgent,
 )
-from .rollout_bir2u_marshal import (
+from .marshal.rollout_bir2u import (
     DEFAULT_MAX_TERMINAL_SIMULATIONS as DEFAULT_MARSHAL_ROLLOUT_BUDGET,
     DEFAULT_ROLLOUT_CANDIDATE_COUNT as DEFAULT_MARSHAL_ROLLOUT_CANDIDATES,
     DEFAULT_ROLLOUT_EPSILON as DEFAULT_MARSHAL_ROLLOUT_EPSILON,
@@ -131,24 +133,24 @@ from .rollout_bir2u_marshal import (
     ROLLOUT_BIR2U_MARSHAL_ALGORITHM_ID,
     RolloutBIR2UMarshalAgent,
 )
-from .catalogue_random_common import (
+from .marshal.catalogue_policy import (
     DEFAULT_CATALOGUE_EPSILON,
     DEFAULT_CATALOGUE_MULTI_GUESS_CONTINUATION,
 )
-from .marshal_candidates import (
+from .marshal.candidates import (
     CATALOGUE_SEED_DOMAIN,
     DEFAULT_CATALOGUE_MAX_GUESS_SIZE,
     DEFAULT_CATALOGUE_MAX_JOINT_CANDIDATES,
 )
-from .route_count_catalogue_random import (
+from .marshal.route_count_catalogue import (
     CONTROLLED_ROUTE_COUNT_ALGORITHM_ID,
     RouteCountCatalogueRandomMarshalAgent,
 )
-from .support_catalogue_random import (
+from .marshal.support_catalogue import (
     CONTROLLED_SUPPORT_ALGORITHM_ID,
     SupportCatalogueRandomMarshalAgent,
 )
-from .unweighted_constructive_bir import (
+from .marshal.bir.unweighted import (
     BIR2U_ALGORITHM_ID,
     BIR2U_BELIEF_SEED_DOMAIN,
     BIR2U_PROPOSAL_KERNEL_ID,
