@@ -69,7 +69,9 @@ are placed face down below the new hideout. Each Sprint card contributes +1 or
 The card values follow parity:
 
 - Odd-numbered cards 1, 3, 5, ..., 41 have Sprint value +1.
-- Even-numbered cards 2, 4, 6, ..., 42 have Sprint value +2.
+- Even-numbered cards 2, 4, 6, ..., 40 have Sprint value +2.
+- Card 42 cannot be used as Sprint; it may only be played as the escape
+  Hideout.
 - Card 0 is the fixed starting Hideout and never enters a hand, so it cannot be
   used as Sprint.
 
@@ -103,8 +105,9 @@ their own face-down Hideout and Sprint cards at any time.
 ## Marshal First Turn
 
 On the first turn, the Marshal draws two cards from any of the three draw decks
-and adds them to their hand. The Marshal may then attempt to uncover the
-Fugitive's hidden hideouts.
+and adds them to their hand. The Marshal must then make one guess action,
+announcing one or more numbers to try to uncover the Fugitive's hidden
+hideouts. The Marshal cannot pass.
 
 ## Uncovering Hideouts
 
@@ -128,13 +131,14 @@ escape route.
 - If even one number is incorrect, nothing is revealed.
 - Sprint cards themselves are never guessed.
 
-After the attempt, whether successful or not, the Marshal's turn ends.
+An empty guess is not allowed. After the attempt, whether successful or not,
+the Marshal's turn ends.
 
 ## Marshal Normal Turn
 
 At the start of each turn after the first, the Marshal draws one card from any
-of the three draw decks and adds it to their hand. The Marshal may then attempt
-to uncover hidden hideouts using the normal guessing rules.
+of the three draw decks and adds it to their hand. The Marshal must then make
+one non-empty guess action using the normal guessing rules.
 
 ## Game End
 

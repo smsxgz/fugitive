@@ -52,20 +52,6 @@
             </div>
           </fieldset>
 
-          <fieldset class="form-field profile-field">
-            <legend>运行</legend>
-            <div class="segmented-control profile-control" role="radiogroup" aria-label="Agent 运行档位">
-              <label>
-                <input type="radio" name="execution_profile" value="full" checked>
-                <span>Full</span>
-              </label>
-              <label>
-                <input type="radio" name="execution_profile" value="quick">
-                <span>Quick demo</span>
-              </label>
-            </div>
-          </fieldset>
-
           <div class="form-field agent-field">
             <label for="fugitiveAgent">Fugitive</label>
             <div id="fugitiveHuman" class="human-slot">你 · Human</div>
@@ -166,9 +152,7 @@
               </div>
               <div class="selection-readout">
                 <span>Hideout <strong id="selectedHideout">—</strong></span>
-                <span>距离 <strong id="selectedDistance">—</strong></span>
-                <span>需要 <strong id="requiredSprint">—</strong></span>
-                <span>已选 <strong id="selectedSprint">+0 · 0张</strong></span>
+                <span>Sprint <strong id="selectedSprint">0 张</strong></span>
               </div>
               <div class="action-buttons">
                 <button id="passButton" class="secondary-command" type="button">Pass</button>
@@ -246,9 +230,8 @@
             </div>
             <dl class="session-details">
               <div><dt>模式</dt><dd id="modeValue">—</dd></div>
-              <div><dt>运行</dt><dd id="profileValue">—</dd></div>
-              <div><dt>Fugitive</dt><dd><span id="fugitiveValue">—</span><small id="fugitiveParameters" hidden></small></dd></div>
-              <div><dt>Marshal</dt><dd><span id="marshalValue">—</span><small id="marshalParameters" hidden></small></dd></div>
+              <div><dt>Fugitive</dt><dd><span id="fugitiveValue">—</span></dd></div>
+              <div><dt>Marshal</dt><dd><span id="marshalValue">—</span></dd></div>
               <div><dt>视角</dt><dd id="viewerValue">—</dd></div>
               <div><dt>Seed</dt><dd id="seedValue">—</dd></div>
             </dl>
@@ -260,26 +243,6 @@
                 <svg aria-hidden="true"><use href="./icons.svg#download"></use></svg>
               </button>
             </div>
-          </section>
-
-          <section id="inferencePanel" class="inference-panel" aria-labelledby="inferenceTitle" hidden>
-            <div class="panel-heading inline-heading">
-              <div>
-                <span class="eyebrow">INFERENCE</span>
-                <h2 id="inferenceTitle">推断状态</h2>
-              </div>
-              <span id="inferenceDecision" class="inference-decision">—</span>
-            </div>
-            <dl class="inference-details">
-              <div><dt>算法</dt><dd id="inferenceAlgorithm">—</dd></div>
-              <div><dt>Backend</dt><dd id="inferenceBackend">—</dd></div>
-              <div><dt>Operation</dt><dd id="inferenceOperation">—</dd></div>
-              <div><dt>Population</dt><dd id="inferencePopulation">—</dd></div>
-              <div><dt>Worlds</dt><dd id="inferenceWorlds">—</dd></div>
-              <div><dt>Hidden route</dt><dd id="inferenceRoutes">—</dd></div>
-              <div><dt>Hard support</dt><dd id="inferenceSupport">—</dd></div>
-              <div><dt>Work</dt><dd id="inferenceWork">—</dd></div>
-            </dl>
           </section>
 
           <section class="log-panel" aria-labelledby="logTitle">

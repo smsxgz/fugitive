@@ -1,3 +1,5 @@
+"""Run the OpenSpiel-backed local Web application."""
+
 from .web.server import main
 
 

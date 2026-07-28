@@ -8,7 +8,7 @@ htmlcov/
 dist/
 build/
 review/
-archive/
 /src/fugitive/fugitive.zip
 /src/fugitive/fugitive_latest.zip
 /experiment_runs/
+/third_party/

@@ -1,0 +1,6 @@
+absl-py>=0.10.0
+attrs>=19.3.0
+ml-collections>=0.1.1
+numpy>=1.21.5
+pytest>=8
+scipy>=1.10.1

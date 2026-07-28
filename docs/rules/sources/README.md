@@ -4,8 +4,8 @@
 
 - Local file: `../CANONICAL_RULES.md`
 - Supplied by the project owner: 2026-07-23
-- Key choices: exactly two opening Hideouts, no pass bonus draw, no Event or
-  SHIFT cards.
+- Key choices: exactly two opening Hideouts, no pass bonus draw, no Marshal
+  pass, and no Event or SHIFT cards.
 
 This source takes precedence over every external rulebook or implementation.
 

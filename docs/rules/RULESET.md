@@ -27,8 +27,8 @@ additional card for passing.
 - The Fugitive starts with cards 1, 2, 3, and 42, then privately draws three
   cards from 4-14 and two cards from 15-28.
 - The Marshal starts with an empty hand.
-- Odd-numbered cards have Sprint value +1. Even-numbered cards have Sprint
-  value +2.
+- Odd-numbered cards have Sprint value +1. Even-numbered cards through 40 have
+  Sprint value +2. Card 42 cannot be used as Sprint.
 
 The pile chosen for each draw is public. The identity of the drawn card is
 private to the player who drew it.
@@ -58,10 +58,14 @@ h - p <= 3 + sum(sprint_value(card) for card in S)
 - The Hideout and Sprint cards are removed from the hand and played face down.
 - The number of Sprint cards is public, but their identities and total value
   are hidden until revealed.
-- Any number of Sprint cards may be used.
+- Any number of eligible Sprint cards may be used, but card 42 is never
+  eligible.
 - Sprint may be overpaid, including when no Sprint is needed. This is a legal
   bluff, so revealed Sprint value must not be treated as an exact distance.
 - The first Hideout may also use Sprint cards.
+- For the first of the two opening Hideouts, the remaining hand must still be
+  able to establish the second opening Hideout. This prevents the first choice
+  from leaving the game with no legal continuation.
 
 ## Marshal guesses
 
@@ -76,6 +80,8 @@ else:
 ```
 
 - The Marshal guesses card numbers, not route positions.
+- The Marshal cannot pass; every Marshal turn includes one non-empty guess
+  action.
 - Sprint cards never need to be guessed.
 - A multi-number guess is all-or-nothing. A failed guess only proves that at
   least one member of `G` was not in `U` at that time.
@@ -85,7 +91,8 @@ else:
 
 - The Marshal wins immediately after revealing every Hideout currently in the
   Fugitive's route.
-- Card 42 must be played as a normal legal Hideout; it is not a free move.
+- Card 42 must be played as a normal legal Hideout; it is not a free move and
+  cannot be spent as Sprint.
 - When the Fugitive plays card 42, inspect the highest already revealed
   Hideout before 42:
   - If it is 30 or higher, the Fugitive wins immediately.
@@ -117,11 +124,11 @@ them as follows so simulations are reproducible:
   first card before choosing the second draw pile.
 - Card 42 becomes public when played, but Sprint identities under it remain
   hidden during Manhunt.
-- The engine and active agents have no artificial round horizon. A completed
-  simulation always has a Fugitive or Marshal rules-defined winner.
+- The OpenSpiel game has a configurable `max_rounds` horizon, defaulting to 50.
+  If the final Marshal turn at that horizon does not produce a winner, the game
+  ends in a draw with returns `[0, 0]` and reason `max_rounds`.
 
-The printed rules do not give arbitrary legal policies a 40-round bound. For
-example, policies can deliberately repeat Pass and the same failed guess after
-the draw piles empty. Built-in Marshal agents avoid such no-progress cycles by
-excluding failed singleton guesses while the route length is unchanged, but
-custom-agent callers are responsible for making progress.
+The horizon is a research convention, not a printed-rule turn limit. It is
+needed because legal policies can repeat Fugitive Pass and failed Marshal
+guesses after the draw piles empty. Experimental results must therefore report
+the configured `max_rounds` value.

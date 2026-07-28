@@ -18,12 +18,12 @@ from typing import Callable, Iterator, Mapping
 from urllib.parse import unquote, urlsplit
 import uuid
 
-from ..agents.registry import DEFAULT_FUGITIVE_AGENT, DEFAULT_MARSHAL_AGENT
 from .session import (
     DEFAULT_AUTO_STEP_LIMIT,
+    DEFAULT_FUGITIVE_AGENT,
+    DEFAULT_MARSHAL_AGENT,
     GameSession,
     WebAPIError,
-    _PROFILE_UNSET,
     _is_integer,
     agent_catalog,
 )
@@ -129,7 +129,6 @@ class SessionStore:
         marshal_agent = payload.get("marshal_agent", DEFAULT_MARSHAL_AGENT)
         seed = payload.get("seed")
         spectator_view = payload.get("spectator_view")
-        execution_profile = payload.get("execution_profile", "full")
         if not isinstance(mode, str):
             raise WebAPIError(HTTPStatus.BAD_REQUEST, "invalid_mode", "mode must be a string")
         if not isinstance(fugitive_agent, str) or not isinstance(marshal_agent, str):
@@ -145,7 +144,6 @@ class SessionStore:
             marshal_agent=marshal_agent,
             seed=seed,  # type: ignore[arg-type]
             spectator_view=spectator_view,  # type: ignore[arg-type]
-            execution_profile=execution_profile,  # type: ignore[arg-type]
             auto_step_limit=self.auto_step_limit,
         )
 
@@ -349,6 +347,8 @@ def make_handler(
                 with store.lease(parts[0]) as session:
                     if operation == "action":
                         state = session.apply_human_action(payload)
+                    elif operation == "preview":
+                        state = session.preview_fugitive_action(payload)
                     elif operation == "step":
                         state = session.step()
                     elif operation == "auto":
@@ -364,11 +364,6 @@ def make_handler(
                     elif operation == "reset":
                         state = session.reset(
                             seed=payload.get("seed"),  # type: ignore[arg-type]
-                            execution_profile=(
-                                payload["execution_profile"]
-                                if "execution_profile" in payload
-                                else _PROFILE_UNSET
-                            ),
                         )
                     elif operation == "view":
                         state = session.set_spectator_view(

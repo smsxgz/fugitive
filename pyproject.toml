@@ -3,13 +3,13 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fugitive-strategy"
-version = "0.1.0"
-description = "Teaching framework for strategy research in the Fugitive card game"
+name = "fugitive-openspiel"
+version = "0.2.0"
+description = "C++ OpenSpiel implementation and local Web UI for the Fugitive card game"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-  { name = "Fugitive course project" },
+  { name = "Fugitive OpenSpiel project" },
 ]
 dependencies = []
 
@@ -19,7 +19,6 @@ test = ["pytest>=8"]
 [project.scripts]
 fugitive = "fugitive.web.server:main"
 fugitive-web = "fugitive.web.server:main"
-fugitive-psro = "fugitive.psro.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

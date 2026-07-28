@@ -203,7 +203,7 @@ main {
 
 .setup-form {
   display: grid;
-  grid-template-columns: minmax(300px, 1.7fr) minmax(165px, 0.8fr) minmax(140px, 1fr) minmax(140px, 1fr) minmax(110px, 0.7fr) auto;
+  grid-template-columns: minmax(300px, 1.7fr) minmax(140px, 1fr) minmax(140px, 1fr) minmax(110px, 0.7fr) auto;
   gap: 14px;
   align-items: end;
 }
@@ -297,10 +297,6 @@ main {
 
 .segmented-control input:focus-visible + span {
   box-shadow: inset 0 0 0 3px rgba(23, 110, 161, 0.35);
-}
-
-.profile-control {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .primary-command,
@@ -433,6 +429,12 @@ main {
   border-color: #abc0c8;
   background: #e8f1f4;
   color: var(--marshal-dark);
+}
+
+.outcome-banner.is-draw {
+  border-color: #b9b9b2;
+  background: #f0f0ec;
+  color: var(--ink);
 }
 
 .outcome-kicker {
@@ -817,6 +819,11 @@ main {
   opacity: 1;
 }
 
+.hand-card.is-unavailable {
+  opacity: 0.42;
+  box-shadow: none;
+}
+
 .hand-card:not(:disabled):hover {
   transform: translateY(-3px);
   box-shadow: 0 6px 0 #d6d8d3;
@@ -843,10 +850,10 @@ main {
 
 .card-sprint {
   position: absolute;
-  right: 6px;
-  bottom: 5px;
-  color: var(--warning);
-  font-size: 10px;
+  right: 7px;
+  bottom: 6px;
+  color: var(--ink-soft);
+  font-size: 12px;
   font-weight: 800;
 }
 
@@ -1114,55 +1121,6 @@ main {
   white-space: nowrap;
 }
 
-.session-details dd small {
-  display: block;
-  margin-top: 3px;
-  color: var(--ink-soft);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 9px;
-  font-weight: 560;
-  line-height: 1.35;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.inference-decision {
-  color: var(--marshal-dark);
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
-  font-weight: 750;
-}
-
-.inference-details {
-  display: grid;
-  margin: 14px 0 0;
-  gap: 0;
-}
-
-.inference-details > div {
-  display: grid;
-  min-width: 0;
-  grid-template-columns: 76px minmax(0, 1fr);
-  gap: 8px;
-  border-bottom: 1px solid #e3e5e0;
-  padding: 7px 0;
-}
-
-.inference-details dt {
-  color: var(--ink-soft);
-  font-size: 10px;
-}
-
-.inference-details dd {
-  min-width: 0;
-  margin: 0;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
 .log-panel {
   min-height: 320px;
 }
@@ -1253,7 +1211,7 @@ main {
   }
 
   .setup-form {
-    grid-template-columns: minmax(290px, 1.5fr) minmax(165px, 0.8fr) repeat(3, minmax(125px, 1fr)) auto;
+    grid-template-columns: minmax(290px, 1.5fr) repeat(3, minmax(125px, 1fr)) auto;
   }
 
   .workspace {
@@ -1363,15 +1321,6 @@ main {
   .segmented-control label + label {
     border-top: 1px solid var(--line);
     border-left: 0;
-  }
-
-  .profile-control {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .profile-control label + label {
-    border-top: 0;
-    border-left: 1px solid var(--line);
   }
 
   .status-strip {

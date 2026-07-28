@@ -1,15 +1,5 @@
-"""Fugitive rules engine, information-set agents, and local Web app."""
+"""Python integration and local Web UI for the C++ OpenSpiel game."""
 
-from .game.engine import GameEngine, play_game
-from .game.model import FugitiveAction, Observation, Role, Winner
+__version__ = "0.2.0"
 
-__version__ = "0.1.0"
-
-__all__ = [
-    "FugitiveAction",
-    "GameEngine",
-    "Observation",
-    "Role",
-    "Winner",
-    "play_game",
-]
+__all__ = ["__version__"]

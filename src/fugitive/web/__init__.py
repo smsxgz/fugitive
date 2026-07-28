@@ -2,18 +2,15 @@
 
 from .server import SessionStore, build_parser, create_server, main, make_handler
 from .session import (
-    EXECUTION_PROFILES,
     MAX_SAFE_JSON_INTEGER,
     WEB_TRACE_SCHEMA_VERSION,
     GameSession,
     WebAPIError,
     agent_catalog,
     parse_web_seed,
-    replay_manifest_from_web_trace,
 )
 
 __all__ = [
-    "EXECUTION_PROFILES",
     "GameSession",
     "MAX_SAFE_JSON_INTEGER",
     "SessionStore",
@@ -25,5 +22,4 @@ __all__ = [
     "main",
     "make_handler",
     "parse_web_seed",
-    "replay_manifest_from_web_trace",
 ]

@@ -20,14 +20,10 @@ const MODE_LABELS = {
   spectate: "观战",
 };
 
-const EXECUTION_PROFILE_LABELS = {
-  full: "Full · default",
-  quick: "Quick demo · interactive",
-};
-
 const ROLE_LABELS = {
   fugitive: "Fugitive",
   marshal: "Marshal",
+  draw: "平局",
   spectator: "观战",
 };
 
@@ -43,6 +39,7 @@ const REASON_LABELS = {
   manhunt_failed: "Marshal 在最终追捕中猜错",
   manhunt_success: "Marshal 完成最终追捕",
   marshal_uncovered_route: "Marshal 揭开全部藏身处",
+  max_rounds: "达到研究版最大回合数",
 };
 
 const elements = {
@@ -79,8 +76,6 @@ const elements = {
   waitingAction: document.querySelector("#waitingAction"),
   waitingText: document.querySelector("#waitingText"),
   selectedHideout: document.querySelector("#selectedHideout"),
-  selectedDistance: document.querySelector("#selectedDistance"),
-  requiredSprint: document.querySelector("#requiredSprint"),
   selectedSprint: document.querySelector("#selectedSprint"),
   passButton: document.querySelector("#passButton"),
   playHideoutButton: document.querySelector("#playHideoutButton"),
@@ -97,25 +92,12 @@ const elements = {
   terminateButton: document.querySelector("#terminateButton"),
   speedSelect: document.querySelector("#speedSelect"),
   modeValue: document.querySelector("#modeValue"),
-  profileValue: document.querySelector("#profileValue"),
   fugitiveValue: document.querySelector("#fugitiveValue"),
-  fugitiveParameters: document.querySelector("#fugitiveParameters"),
   marshalValue: document.querySelector("#marshalValue"),
-  marshalParameters: document.querySelector("#marshalParameters"),
   viewerValue: document.querySelector("#viewerValue"),
   seedValue: document.querySelector("#seedValue"),
   copySeedButton: document.querySelector("#copySeedButton"),
   exportTraceButton: document.querySelector("#exportTraceButton"),
-  inferencePanel: document.querySelector("#inferencePanel"),
-  inferenceDecision: document.querySelector("#inferenceDecision"),
-  inferenceAlgorithm: document.querySelector("#inferenceAlgorithm"),
-  inferenceBackend: document.querySelector("#inferenceBackend"),
-  inferenceOperation: document.querySelector("#inferenceOperation"),
-  inferencePopulation: document.querySelector("#inferencePopulation"),
-  inferenceWorlds: document.querySelector("#inferenceWorlds"),
-  inferenceRoutes: document.querySelector("#inferenceRoutes"),
-  inferenceSupport: document.querySelector("#inferenceSupport"),
-  inferenceWork: document.querySelector("#inferenceWork"),
   logCount: document.querySelector("#logCount"),
   gameLog: document.querySelector("#gameLog"),
   toast: document.querySelector("#toast"),
@@ -129,6 +111,8 @@ const app = {
   cardMode: "hideout",
   selectedHideout: null,
   selectedSprint: new Set(),
+  fugitiveDraft: null,
+  fugitiveDraftToken: 0,
   selectedGuesses: new Set(),
   autoRunning: false,
   autoTimer: null,
@@ -146,10 +130,6 @@ class APIError extends Error {
 
 function getMode() {
   return new FormData(elements.setupForm).get("mode") || "human_fugitive";
-}
-
-function getExecutionProfile() {
-  return new FormData(elements.setupForm).get("execution_profile") || "full";
 }
 
 function setConnection(kind, label) {
@@ -261,12 +241,12 @@ async function loadAgents() {
     fillAgentSelect(
       elements.fugitiveAgent,
       app.agents.fugitive,
-      payload.defaults?.fugitive || "belief-informed-random",
+      payload.defaults?.fugitive || "random",
     );
     fillAgentSelect(
       elements.marshalAgent,
       app.agents.marshal,
-      payload.defaults?.marshal || "belief-informed-random",
+      payload.defaults?.marshal || "random",
     );
     renderStartGameAvailability();
   } catch (error) {
@@ -309,7 +289,6 @@ async function startGame(event) {
 
   const body = {
     mode: getMode(),
-    execution_profile: getExecutionProfile(),
     fugitive_agent: elements.fugitiveAgent.value,
     marshal_agent: elements.marshalAgent.value,
   };
@@ -335,6 +314,8 @@ function resetSelections() {
   app.cardMode = "hideout";
   app.selectedHideout = null;
   app.selectedSprint.clear();
+  app.fugitiveDraft = null;
+  app.fugitiveDraftToken += 1;
   app.selectedGuesses.clear();
 }
 
@@ -438,7 +419,6 @@ function renderGame() {
   renderHand();
   renderActions();
   renderSession();
-  renderInference();
   renderHistory();
   renderSpectatorControls();
 }
@@ -460,8 +440,12 @@ function renderStatus() {
   const finished = game.status === "finished";
   elements.outcomeBanner.hidden = !finished;
   elements.outcomeBanner.classList.toggle("is-marshal", game.winner === "marshal");
+  elements.outcomeBanner.classList.toggle("is-draw", game.winner === "draw");
   if (finished) {
-    elements.outcomeTitle.textContent = `${ROLE_LABELS[game.winner] || game.winner} 获胜`;
+    elements.outcomeTitle.textContent =
+      game.winner === "draw"
+        ? "对局平局"
+        : `${ROLE_LABELS[game.winner] || game.winner} 获胜`;
     elements.outcomeReason.textContent = REASON_LABELS[game.reason] || String(game.reason || "");
   }
 }
@@ -581,16 +565,19 @@ function renderRoute() {
   }
 }
 
-function sprintValue(card) {
-  return card % 2 === 0 ? 2 : 1;
-}
-
 function cardNumbers(value) {
   return Array.isArray(value) ? value.filter(Number.isInteger) : [];
 }
 
 function handNumbers() {
   return app.game ? cardNumbers(app.game.hand) : [];
+}
+
+function displayedSprintValue(cardNumber) {
+  if (cardNumber === 42) {
+    return null;
+  }
+  return cardNumber % 2 === 0 ? 2 : 1;
 }
 
 function canSelectFugitiveCards() {
@@ -600,6 +587,20 @@ function canSelectFugitiveCards() {
     app.game.viewer_role === "fugitive" &&
     isFugitiveActionPhase()
   );
+}
+
+function canSelectFugitiveCard(cardNumber) {
+  if (!canSelectFugitiveCards()) {
+    return false;
+  }
+  const legal = legalActions();
+  const field = app.cardMode === "hideout" ? "candidate_hideouts" : "sprint_cards";
+  const allowed = new Set(cardNumbers(legal[field]));
+  if (app.cardMode === "sprint" && !Number.isInteger(app.selectedHideout)) {
+    return false;
+  }
+  return allowed.has(cardNumber) &&
+    !(app.cardMode === "sprint" && app.selectedHideout === cardNumber);
 }
 
 function renderHand() {
@@ -676,38 +677,44 @@ function createHandGroup(role, cards, interactive) {
 }
 
 function createHandCard(cardNumber, interactive) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "hand-card";
-    button.setAttribute("role", "listitem");
-    button.setAttribute("aria-pressed", "false");
-    button.disabled = !interactive;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "hand-card";
+  button.setAttribute("role", "listitem");
+  button.setAttribute("aria-pressed", "false");
+  const selectable = interactive && canSelectFugitiveCard(cardNumber);
+  button.disabled = !selectable;
+  button.classList.toggle("is-unavailable", interactive && !selectable);
 
-    const isHideout = app.selectedHideout === cardNumber;
-    const isSprint = app.selectedSprint.has(cardNumber);
-    button.classList.toggle("is-hideout", isHideout);
-    button.classList.toggle("is-sprint", isSprint);
-    button.setAttribute("aria-pressed", String(isHideout || isSprint));
-    button.setAttribute(
-      "aria-label",
-      `牌 ${cardNumber}，Sprint 值 ${sprintValue(cardNumber)}${
-        isHideout ? "，选作藏身处" : isSprint ? "，选作 Sprint" : ""
-      }`
-    );
+  const isHideout = app.selectedHideout === cardNumber;
+  const isSprint = app.selectedSprint.has(cardNumber);
+  button.classList.toggle("is-hideout", isHideout);
+  button.classList.toggle("is-sprint", isSprint);
+  button.setAttribute("aria-pressed", String(isHideout || isSprint));
+  const sprintValue = displayedSprintValue(cardNumber);
+  button.setAttribute(
+    "aria-label",
+    `牌 ${cardNumber}${sprintValue === null ? "，逃脱牌" : `，Sprint 值 ${sprintValue}`}${
+      isHideout ? "，选作藏身处" : isSprint ? "，选作 Sprint" : ""
+    }`
+  );
 
-    const number = document.createElement("strong");
-    number.className = "card-number";
-    number.textContent = String(cardNumber);
+  const number = document.createElement("strong");
+  number.className = "card-number";
+  number.textContent = String(cardNumber);
+  button.append(number);
+  if (sprintValue !== null) {
     const sprint = document.createElement("span");
     sprint.className = "card-sprint";
-    sprint.textContent = `+${sprintValue(cardNumber)}`;
-    button.append(number, sprint);
-    button.addEventListener("click", () => selectHandCard(cardNumber));
-    return button;
+    sprint.textContent = `+${sprintValue}`;
+    button.append(sprint);
+  }
+  button.addEventListener("click", () => selectHandCard(cardNumber));
+  return button;
 }
 
 function selectHandCard(cardNumber) {
-  if (!canSelectFugitiveCards()) {
+  if (!canSelectFugitiveCard(cardNumber)) {
     return;
   }
   if (app.cardMode === "hideout") {
@@ -724,77 +731,103 @@ function selectHandCard(cardNumber) {
     }
   }
   renderHand();
-  renderFugitiveSelection();
+  void refreshFugitiveDraft();
 }
 
-function openingHasContinuation(hideout, sprintCards) {
-  if (app.game.phase !== "fugitive_opening" || !Array.isArray(app.game.route)) {
-    return true;
+function fugitiveDraftKey() {
+  return JSON.stringify([
+    app.gameId,
+    app.selectedHideout,
+    [...app.selectedSprint].sort((a, b) => a - b),
+  ]);
+}
+
+async function refreshFugitiveDraft() {
+  const token = app.fugitiveDraftToken + 1;
+  app.fugitiveDraftToken = token;
+  if (!Number.isInteger(app.selectedHideout)) {
+    app.fugitiveDraft = null;
+    renderFugitiveSelection();
+    return;
   }
-  if (app.game.route.length !== 1) {
-    return true;
-  }
-  const spent = new Set([hideout, ...sprintCards]);
-  const remaining = handNumbers().filter((card) => !spent.has(card));
-  return remaining.some((nextHideout) => {
-    if (nextHideout <= hideout) {
-      return false;
+
+  const key = fugitiveDraftKey();
+  const sprintCards = [...app.selectedSprint].sort((a, b) => a - b);
+  app.fugitiveDraft = { key, status: "checking", canCommit: false };
+  renderFugitiveSelection();
+  try {
+    const result = await requestJSON(
+      `/games/${encodeURIComponent(app.gameId)}/preview`,
+      {
+        method: "POST",
+        body: { hideout: app.selectedHideout, sprint_cards: sprintCards },
+      },
+    );
+    if (token !== app.fugitiveDraftToken || key !== fugitiveDraftKey()) {
+      return;
     }
-    const capacity = remaining
-      .filter((card) => card !== nextHideout)
-      .reduce((total, card) => total + sprintValue(card), 0);
-    return nextHideout - hideout <= 3 + capacity;
-  });
+    app.fugitiveDraft = {
+      key,
+      status: result.valid_prefix ? "valid" : "invalid",
+      canCommit: Boolean(result.can_commit),
+    };
+  } catch (error) {
+    if (token !== app.fugitiveDraftToken || key !== fugitiveDraftKey()) {
+      return;
+    }
+    app.fugitiveDraft = { key, status: "error", canCommit: false };
+    showToast(error.message);
+  }
+  renderFugitiveSelection();
 }
 
 function fugitiveSelectionStatus() {
   const legal = legalActions();
-  const previous = Number.isInteger(legal.previous_hideout)
-    ? legal.previous_hideout
-    : Array.isArray(app.game.route) && app.game.route.length
-      ? app.game.route[app.game.route.length - 1].hideout
-      : null;
   const hideout = app.selectedHideout;
   const sprintCards = [...app.selectedSprint].sort((a, b) => a - b);
-  const selectedValue = sprintCards.reduce((total, card) => total + sprintValue(card), 0);
+  const candidateHideouts = new Set(cardNumbers(legal.candidate_hideouts));
+  const availableSprints = new Set(cardNumbers(legal.sprint_cards));
 
-  if (!Number.isInteger(hideout) || !Number.isInteger(previous)) {
+  if (!Number.isInteger(hideout)) {
     return {
-      valid: false,
+      ready: false,
+      error: false,
       label: "选择藏身处",
-      distance: null,
-      required: null,
-      selectedValue,
       sprintCards,
     };
   }
-
-  const distance = hideout - previous;
-  const required = Math.max(0, distance - 3);
-  if (distance <= 0) {
-    return { valid: false, label: "藏身处必须前进", distance, required, selectedValue, sprintCards };
-  }
-  if (selectedValue < required) {
+  if (!candidateHideouts.has(hideout)) {
     return {
-      valid: false,
-      label: `还需 +${required - selectedValue} Sprint`,
-      distance,
-      required,
-      selectedValue,
+      ready: false,
+      error: true,
+      label: "藏身处选择已失效",
       sprintCards,
     };
   }
-  if (!openingHasContinuation(hideout, sprintCards)) {
+  if (sprintCards.some((card) => card === hideout || !availableSprints.has(card))) {
     return {
-      valid: false,
-      label: "开局后续无合法藏身处",
-      distance,
-      required,
-      selectedValue,
+      ready: false,
+      error: true,
+      label: "Sprint 选择已失效",
       sprintCards,
     };
   }
-  return { valid: true, label: "可出牌", distance, required, selectedValue, sprintCards };
+  const draft = app.fugitiveDraft;
+  if (!draft || draft.key !== fugitiveDraftKey() || draft.status === "checking") {
+    return { ready: false, error: false, label: "正在检查", sprintCards };
+  }
+  if (draft.status === "error") {
+    return { ready: false, error: true, label: "无法检查当前组合", sprintCards };
+  }
+  if (draft.status === "invalid") {
+    return { ready: false, error: true, label: "当前组合无法完成", sprintCards };
+  }
+  return {
+    ready: draft.canCommit,
+    error: false,
+    label: draft.canCommit ? "可出牌" : "继续选择 Sprint",
+    sprintCards,
+  };
 }
 
 function setCardMode(mode) {
@@ -809,16 +842,14 @@ function setCardMode(mode) {
 function renderFugitiveSelection() {
   const status = fugitiveSelectionStatus();
   elements.selectedHideout.textContent = app.selectedHideout === null ? "—" : String(app.selectedHideout);
-  elements.selectedDistance.textContent = status.distance === null ? "—" : String(status.distance);
-  elements.requiredSprint.textContent = status.required === null ? "—" : `+${status.required}`;
-  elements.selectedSprint.textContent = `+${status.selectedValue} · ${status.sprintCards.length}张`;
+  elements.selectedSprint.textContent = `${status.sprintCards.length} 张`;
   elements.actionStatus.textContent = status.label;
-  elements.actionStatus.classList.toggle("is-valid", status.valid);
-  elements.actionStatus.classList.toggle("is-invalid", !status.valid);
-  elements.playHideoutButton.disabled = app.busy || !status.valid;
+  elements.actionStatus.classList.remove("is-valid");
+  elements.actionStatus.classList.toggle("is-invalid", status.error);
+  elements.playHideoutButton.disabled = app.busy || !status.ready;
   const canPass = Boolean(legalActions().can_pass);
   elements.passButton.disabled = app.busy || !canPass;
-  elements.passButton.title = canPass ? "本回合 Pass" : "开局必须建立两个藏身处";
+  elements.passButton.title = canPass ? "本回合 Pass" : "当前不可 Pass";
   setCardMode(app.cardMode);
 }
 
@@ -958,14 +989,10 @@ function renderGuessGrid() {
 function renderSession() {
   const game = app.game;
   elements.modeValue.textContent = MODE_LABELS[game.mode] || String(game.mode || "—");
-  elements.profileValue.textContent =
-    EXECUTION_PROFILE_LABELS[game.execution_profile] || String(game.execution_profile || "—");
   elements.fugitiveValue.textContent =
     game.mode === "human_fugitive" ? "你 · Human" : String(game.fugitive_agent || "—");
   elements.marshalValue.textContent =
     game.mode === "human_marshal" ? "你 · Human" : String(game.marshal_agent || "—");
-  renderAgentParameters("fugitive", elements.fugitiveParameters);
-  renderAgentParameters("marshal", elements.marshalParameters);
   elements.viewerValue.textContent =
     game.mode === "spectate"
       ? SPECTATOR_VIEW_LABELS[game.spectator_view] || "观战"
@@ -982,126 +1009,6 @@ function renderSession() {
   elements.copySeedButton.disabled = app.busy || !exactSeedVisible;
   elements.exportTraceButton.hidden = !game.can_export;
   elements.exportTraceButton.disabled = app.busy || !game.can_export;
-}
-
-function renderAgentParameters(role, target) {
-  const humanRole = app.game?.mode === "human_fugitive"
-    ? "fugitive"
-    : app.game?.mode === "human_marshal"
-      ? "marshal"
-      : null;
-  const configuration = app.game?.agents?.[role];
-  const parameters = configuration?.parameters;
-  const keys = ["particle_count", "max_guess_candidates", "mh_steps_per_chain"];
-  const values = role !== humanRole && parameters && typeof parameters === "object"
-    ? keys
-      .filter((key) => Object.prototype.hasOwnProperty.call(parameters, key))
-      .map((key) => `${key}=${parameters[key]}`)
-    : [];
-  target.textContent = values.join(" · ");
-  target.hidden = values.length === 0;
-}
-
-function formatDiagnosticNumber(value, digits = 1) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return "—";
-  }
-  if (Number.isInteger(value)) {
-    return String(value);
-  }
-  return value.toFixed(digits).replace(/\.0+$/, "");
-}
-
-function formatDiagnosticPercent(value) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return "—";
-  }
-  return `${(100 * value).toFixed(1).replace(/\.0$/, "")}%`;
-}
-
-function formatSamplingWork(sampling, { includeImportance = true } = {}) {
-  if (!sampling || typeof sampling !== "object") {
-    return "—";
-  }
-  const parts = [
-    `proposals ${formatDiagnosticNumber(sampling.proposals, 0)}`,
-    `nodes ${formatDiagnosticNumber(sampling.search_nodes, 0)}`,
-  ];
-  if (includeImportance && typeof sampling.proposal_importance_ess === "number") {
-    parts.push(`SNIS ESS ${formatDiagnosticNumber(sampling.proposal_importance_ess)}`);
-  }
-  return parts.join(" · ");
-}
-
-function formatInferenceWork(work) {
-  if (!work || typeof work !== "object") {
-    return "—";
-  }
-  if (work.kind === "bootstrap") {
-    return [
-      `reset ${formatDiagnosticNumber(work.support_extinction_reset_count, 0)}`,
-      `resample ${formatDiagnosticNumber(work.systematic_resampling_count, 0)}`,
-      `origin accepted ${formatDiagnosticNumber(work.origin_fresh_sampling_accepted, 0)}/${formatDiagnosticNumber(work.origin_fresh_sampling_proposals, 0)}`,
-      `pre-ESS min ${formatDiagnosticNumber(work.minimum_pre_resample_entry_ess)}`,
-    ].join(" · ");
-  }
-  if (work.kind === "constructive") {
-    return [
-      String(work.weighting_id || "—"),
-      formatSamplingWork(work.sampling),
-    ].join(" · ");
-  }
-  if (work.kind === "sir_independent_mh") {
-    return [
-      `initial ${String(work.initial_weighting_id || "—")} · ${formatSamplingWork(work.initial_sampling)}`,
-      `MH-q ${formatSamplingWork(work.mh_proposal_sampling, { includeImportance: false })}`,
-      `accept ${formatDiagnosticNumber(work.accepted, 0)}/${formatDiagnosticNumber(work.mh_proposals, 0)} (${formatDiagnosticPercent(work.acceptance_rate)})`,
-      `change ${formatDiagnosticNumber(work.changed, 0)} (${formatDiagnosticPercent(work.change_rate)})`,
-    ].join(" · ");
-  }
-  return String(work.kind || "—");
-}
-
-function renderInference() {
-  const events = Array.isArray(app.game?.inference_events)
-    ? app.game.inference_events
-    : [];
-  const event = events.at(-1);
-  const diagnostics = event?.diagnostics;
-  const quality = diagnostics?.quality;
-  const visible = Boolean(event && diagnostics && quality);
-  elements.inferencePanel.hidden = !visible;
-  if (!visible) {
-    return;
-  }
-
-  elements.inferenceDecision.textContent = [
-    `#${event.decision}`,
-    `R${event.round_number}`,
-    ROLE_LABELS[event.role] || event.role,
-  ].join(" · ");
-  elements.inferenceAlgorithm.textContent = String(diagnostics.algorithm_id || "—");
-  elements.inferenceBackend.textContent = String(diagnostics.backend_id || "—");
-  elements.inferenceOperation.textContent = String(diagnostics.operation || "—");
-  elements.inferencePopulation.textContent = [
-    `${formatDiagnosticNumber(quality.particle_entries, 0)}/${formatDiagnosticNumber(quality.requested_particles, 0)} entries`,
-    `ESS ${formatDiagnosticNumber(quality.entry_ess)}`,
-  ].join(" · ");
-  elements.inferenceWorlds.textContent = [
-    `${formatDiagnosticNumber(quality.unique_worlds, 0)} unique`,
-    `ESS ${formatDiagnosticNumber(quality.world_ess)}`,
-    `max ${formatDiagnosticPercent(quality.max_world_mass)}`,
-  ].join(" · ");
-  elements.inferenceRoutes.textContent = [
-    `${formatDiagnosticNumber(quality.unique_hidden_routes, 0)} unique`,
-    `ESS ${formatDiagnosticNumber(quality.hidden_route_ess)}`,
-    `max ${formatDiagnosticPercent(quality.max_hidden_route_mass)}`,
-  ].join(" · ");
-  elements.inferenceSupport.textContent = formatDiagnosticNumber(
-    quality.hard_route_support_count,
-    0,
-  );
-  elements.inferenceWork.textContent = formatInferenceWork(diagnostics.work);
 }
 
 async function copyExactSeed() {
@@ -1300,7 +1207,7 @@ function renderInteractiveState() {
 
 async function submitFugitiveAction() {
   const status = fugitiveSelectionStatus();
-  if (!status.valid || app.selectedHideout === null) {
+  if (!status.ready || app.selectedHideout === null) {
     return;
   }
   try {
@@ -1387,7 +1294,7 @@ async function autoTick() {
     return;
   }
   try {
-    await mutateGame("auto", { max_steps: 1 });
+    await mutateGame("step", {});
   } catch (_error) {
     stopAuto();
     return;
@@ -1479,7 +1386,10 @@ function bindEvents() {
     }
   });
   for (const button of document.querySelectorAll("[data-card-mode]")) {
-    button.addEventListener("click", () => setCardMode(button.dataset.cardMode));
+    button.addEventListener("click", () => {
+      setCardMode(button.dataset.cardMode);
+      renderHand();
+    });
   }
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && app.gameId && !app.autoRunning) {
