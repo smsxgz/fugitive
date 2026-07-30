@@ -34,6 +34,22 @@ inline constexpr int kDefaultMaxRounds = 50;
 inline constexpr int kMaximumMaxRounds =
     (std::numeric_limits<int>::max() - 100) / 100;
 
+inline int PileForCard(int card) {
+  if (card >= 4 && card <= 14) return 0;
+  if (card >= 15 && card <= 28) return 1;
+  if (card >= 29 && card <= 41) return 2;
+  return -1;
+}
+
+inline bool CanBeSprint(int card) {
+  return card >= kMinCard && card < kMaxCard;
+}
+
+inline int SprintValue(int card) {
+  SPIEL_CHECK_TRUE(CanBeSprint(card));
+  return card % 2 == 0 ? 2 : 1;
+}
+
 enum class Phase {
   kSetupChance,
   kFugitiveDrawChoice,
@@ -116,11 +132,9 @@ class FugitiveState : public State {
  private:
   bool IsChancePhase() const;
   int SetupPile() const;
-  int PileForCard(int card) const;
   std::array<int, 3> PileSizes() const;
   std::vector<int> NonemptyPiles() const;
   bool CardInHand(Player player, int card) const;
-  static int SprintValue(int card);
   static int SprintTotal(const std::vector<int>& cards);
   static bool HasLegalHideoutPlay(const std::vector<int>& hand,
                                   int previous_hideout);

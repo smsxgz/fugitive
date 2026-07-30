@@ -116,7 +116,7 @@ setup 加其余 33 张可抽牌），以及保守的
 
 ### 牌与初始状态
 
-牌面是整数 `0..42`，共 43 张，每张只出现一次：
+牌面是整数 `1..42`，共 42 张；此外用 `0` 表示公开路线起点：
 
 | 卡牌 | 初始位置 |
 | --- | --- |
@@ -351,9 +351,9 @@ policy 与显式 chance 概率采样，以及 JSON 汇总。`mean_returns` 是�
 
 需要额外工作才能使用的方向：
 
-- IS-MCTS 需要正确实现 `ResampleFromInfostate`。当前 C++ game 未实现该接口，不能
-  用简单 determinization 冒充；实测 `ISMCTSBot.step()` 会直接得到
-  `ResampleFromInfostate() not implemented`；
+- IS-MCTS 需要正确实现 `ResampleFromInfostate`。Marshal 侧已有按 Completion 质量的
+  可重放采样器，但 Fugitive 侧尚未实现，因此 C++ game 仍不覆盖该双方接口；当前调用
+  `ISMCTSBot.step()` 仍会得到 `ResampleFromInfostate() not implemented`；
 - OpenSpiel AlphaZero 示例面向完全信息设置，并依赖 tensor observation。当前 game
   只提供字符串 observation，且隐藏信息下还需要明确定义合法的训练信息边界，因此
   不能宣称可直接公平应用；
@@ -370,7 +370,122 @@ information-state tensor 或专用神经网络编码；依赖这些接口的算�
 无论选择哪种算法，实验都应固定 OpenSpiel commit、`max_rounds`、算法 seed 和主要
 预算参数，并通过玩家视角的 information state 检查无私有信息泄漏。
 
-## 9. 更新 OpenSpiel 版本
+## 9. Marshal Route / Completion DP
+
+`cpp/fugitive/belief.{h,cc}` 实现了两层 Marshal belief 计数。生产入口
+`BuildMarshalBeliefInput` 只接受 `InformationStateString(kMarshalPlayer)`；JSON 只在
+边界解析一次，内部只使用小数组、mask 和紧凑 memo key，不能访问全知
+`FugitiveState` 的隐藏 getter。
+
+Route 层枚举满足以下约束的具体 Hideout 路线：
+
+- Hideout 严格递增，且满足公开 Sprint 张数或已揭示 Sprint value；
+- 排除 Marshal 当前手牌与所有已揭示 Sprint；
+- 失败单猜和多猜只约束猜测发生时已经存在的路线前缀；
+- Hideout 与已揭示 Sprint 必须能占用其打出 round 之前的 Fugitive 抽牌槽；
+- 42 只允许作为 Manhunt 状态中的最后一个 Hideout，永不作为 Sprint。
+
+它输出 `route_support_upper_bound` 和未揭示 Hideout 的 route-support 计数。后者是在
+Route 支持集均匀计数下的精确频率，但没有按 Completion 历史质量加权，只用于结构
+诊断，不能作为 Marshal 的信念概率。
+
+Completion 层对每条 Route 做进一步计数。候选 Sprint 分成 8 个桶：固定牌 1/3、
+固定牌 2，以及三个牌堆各自的奇数/偶数牌。对路线位置 `i`：
+
+```text
+min_even = max(0, gap - 3 - sprint_count)
+identity_ways = product C(remaining_bucket, selected_bucket)
+slot_ways = product P(eligible_slots - used_slots, required_cards)
+```
+
+所有 Route 牌、Marshal 手牌和已揭示 Sprint 会先从桶中移除，避免同一张牌重复使用。
+隐藏 Sprint 必须满足 `min_even`，来自牌堆的 Hideout/Sprint 必须被分配到打出 round
+之前的有序 F 抽牌槽；到路线末尾，再用 `P(remaining_cards, unused_slots)` 补齐仍留在
+F 手牌中的隐藏抽牌。固定牌 1/2/3 不占抽牌槽，42 不进入 Sprint 桶。
+
+一次计数单位包括一条具体 Hideout Route、每个隐藏 Sprint 的具体集合，以及所有
+Fugitive 隐藏抽牌事件的具体牌与顺序。不重复计算手牌顺序、未抽牌堆排列或公开的
+牌堆选择。给定同一个 information state，这些具体 F 抽牌序列的 chance 分母相同，
+所以组合质量与 chance 质量成比例；但它没有乘 Fugitive 的动作策略概率，因此明确
+命名为 `uniform_consistent_history_mass`，不是 posterior。运行时用 `long double`
+累计，范围足够当前完整牌组实验，但大质量不是逐位精确整数。
+
+每条具体 Route 得到 Completion mass 时，同一次遍历还会把该质量累加到路线上的每张
+隐藏 Hideout，得到 `UniformConsistentHiddenHideoutProbability(card)`。这才是当前
+uniform-consistent 模型下的 history-weighted 单牌边缘；它仍然不是加入 Fugitive
+策略后的 posterior，也不能把多个单牌概率相乘来代替联合猜测概率。
+
+Completion memo 的状态只有：
+
+```text
+(route_position, remaining[8], used_draw_slots[3])
+```
+
+8 个 `remaining` 和 3 个 `used_draw_slots` 各占 4 bit；构造根状态时显式检查每个字段
+小于 16，`fugitive_draw_rounds` 也受同一限制，避免未来改牌组后发生静默 key 碰撞。
+这些小计数无损打包到一个 `uint64_t`。不同具体 Route 若每个位置的牌桶及
+`min_even` 相同，就共享同一个 Completion 结果；同一桶内牌身份对组合计数是对称的，
+但总质量仍按每条具体 Route 分别累加。
+
+Sampler 先在 Route 枚举中按每条路线的 Completion mass 做加权蓄水池抽样，再沿选中
+路线的 Completion memo 回溯 Sprint 桶数；桶内具体身份、deadline 前的有序抽牌槽和
+剩余隐藏抽牌分别做无拒绝抽样。`ReplayMarshalHistory` 随后只使用公开时间线和这份样本
+从初始状态重建对局。每个动作都必须属于 engine 的 `LegalActions()`，最终 Marshal
+information string 必须逐字节等于目标字符串；非法样本会立即失败，不会丢弃重采。
+当前也支持 Marshal 正在逐个组装猜测数字的原子化中间状态。
+
+正式测试只保留手工可穷举计数、replay 和采样统计三类集中保护。作为一次性独立审计，
+另用不共享 DP 代码的临时暴力枚举器对拍 4,144 个小状态，mass 和可补全路线数均为
+0 失配；真实对局 oracle 另检查 1,320 个状态的真实 Route/Sprint 可补全性，0 失败。
+该临时枚举器会复制约 445 行规则逻辑，因此不作为仓库内常驻的第二套实现。
+
+固定回归使用完整 42 张牌和 `max_rounds=50`，在 Marshal 猜测宏动作边界收集
+Early/Middle/Late 各 32 个去重信息状态。覆盖器只负责产生状态，不是策略模型。
+2026-07-30 的固定 seed 0 复跑如下：
+
+| Completion 时间 | Early | Middle | Late |
+| --- | ---: | ---: | ---: |
+| p50 | 10 us | 3.65 ms | 0.94 ms |
+| p95 | 103 us | 44.52 ms | 147.78 ms |
+| max | 114 us | 68.72 ms | 175.75 ms |
+
+Route 层仍为微秒级。实验扫描 36 个 seed、完成 96/96 样本，包含 sampler/replay 后的
+wall time 为 1.64 s，峰值 RSS 11,276 KiB。最大 Route 支持为 9,369；47/96 个状态有
+Route 被 Completion 排除，单个状态最多排除 1,614 条。96/96 个状态各抽取一个完整
+隐藏历史并成功重放。Sampler 的 Late p95/max 为 147.64/174.74 ms；engine replay
+全局最大 0.46 ms。复现命令：
+
+```bash
+third_party/open_spiel/build/games/fugitive_belief_experiment \
+  --samples_per_bucket 32 --seed_start 0 --max_seeds 1000
+```
+
+固定 Early/Middle/Late 标签不能证明深局覆盖，因此另有全 Marshal 边界 sweep：
+
+```bash
+third_party/open_spiel/build/games/fugitive_belief_experiment \
+  --mode sweep --seed_start 0 --max_seeds 40
+```
+
+两种模式默认都使用 `--replay_samples 1`；只测 Route/Completion 性能而不做构造性验证
+时可设为 0。
+
+该次 sweep 覆盖 644 个去重状态，其中普通 Guess 且 Route support 至少 1,000 的状态
+89 个、隐藏 Sprint 至少 10 张的状态 149 个、两者交集 55 个。普通 Guess 的
+`route_length >= 10` 有 11 个，最深为 12；该子集 Completion 最大 15.31 ms。全体
+Completion p99/max 为 103.66/176.21 ms，Sampler p99/max 为 104.01/175.38 ms，Replay
+最大 0.62 ms，峰值 RSS 13,048 KiB。644/644 个样本全部合法重放。
+
+因此当前结论限定为：在已观测的高 support、高隐藏 Sprint 以及深至 12 的状态上，
+Route、Completion 和 Marshal sampler 都是 **go**。这不是对所有策略分布或路线
+长度 13-14 的保证。Replay 证明每个已采样历史具有构造性合法性，但不构成所有正质量
+分支的形式化完备证明。
+
+当前 sampler 只解决 Marshal 视角。OpenSpiel `ResampleFromInfostate` 还要求 Fugitive
+视角保持其私有历史并重采 Marshal 隐藏抽牌；在该独立采样器完成前，game 不覆盖此
+接口，也不接 IS-MCTS。
+
+## 10. 更新 OpenSpiel 版本
 
 上游升级不是简单改 tag。至少要按以下顺序处理：
 

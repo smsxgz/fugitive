@@ -44,9 +44,11 @@ fi
   -DCMAKE_CXX_COMPILER="${CXX}"
 
 "${CONDA}" run -n openspiel cmake --build "${BUILD_DIR}" \
-  --target fugitive_test pyspiel --parallel "${BUILD_JOBS}"
+  --target fugitive_test fugitive_belief_test fugitive_belief_experiment \
+  pyspiel \
+  --parallel "${BUILD_JOBS}"
 "${CONDA}" run -n openspiel ctest --test-dir "${BUILD_DIR}" \
-  --output-on-failure --tests-regex '^fugitive_test$'
+  --output-on-failure --tests-regex '^fugitive(_belief)?_test$'
 
 PYTHONPATH="${ROOT}/src:${OPEN_SPIEL_DIR}:${BUILD_DIR}/python" \
   "${CONDA}" run -n openspiel python -m pytest -q "${ROOT}/tests"

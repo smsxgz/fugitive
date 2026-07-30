@@ -23,7 +23,9 @@ OpenSpiel game；Python 只保留薄适配层和本地对局网页。
 | 路径 | 本项目维护的内容 |
 | --- | --- |
 | [`cpp/fugitive/fugitive.h`](cpp/fugitive/fugitive.h)、[`fugitive.cc`](cpp/fugitive/fugitive.cc) | OpenSpiel game、state、规则、动作、信息状态和序列化接口 |
-| [`cpp/fugitive/fugitive_test.cc`](cpp/fugitive/fugitive_test.cc) | C++ 规则与 OpenSpiel 契约测试 |
+| [`cpp/fugitive/belief.h`](cpp/fugitive/belief.h)、[`belief.cc`](cpp/fugitive/belief.cc) | 只读取 Marshal information state 的 Route / Completion DP、加权边缘、隐藏历史采样与重放 |
+| [`cpp/fugitive/fugitive_test.cc`](cpp/fugitive/fugitive_test.cc)、[`belief_test.cc`](cpp/fugitive/belief_test.cc) | C++ 规则、OpenSpiel 契约和 DP 核心语义测试 |
+| [`cpp/fugitive/belief_experiment.cc`](cpp/fugitive/belief_experiment.cc) | 完整牌组的固定回归与全 Marshal 决策点 belief sweep |
 | [`src/fugitive`](src/fugitive) | Python 包入口，以及网页对 `pyspiel.State` 的薄适配层和静态前端 |
 | [`tests`](tests) | Python/OpenSpiel 集成测试和网页适配测试 |
 | [`examples/train_outcome_sampling.py`](examples/train_outcome_sampling.py) | 调用 OpenSpiel C++ outcome-sampling MCCFR 的最小实验入口 |
@@ -53,7 +55,7 @@ CMake 注册项的补丁。项目源文件因此仍由本仓库维护，第三�
 
 需要 Git、Conda，以及 Linux C++ 构建环境。下面的命令会创建名为
 `openspiel` 的 Conda 环境、下载固定版本的 OpenSpiel 及其必要依赖，然后编译
-`fugitive_test` 和 `pyspiel`：
+Fugitive、belief DP 测试、实验程序和 `pyspiel`：
 
 ```bash
 bash scripts/setup_openspiel.sh
@@ -110,7 +112,7 @@ OpenSpiel 的算法清单很长，但“仓库中有实现”不等于“适合�
 | 接口兼容但当前不实用 | external-sampling MCCFR | 会在更新方节点遍历全部动作；本机 `max_rounds=1` 的一次 C++ 迭代 30 秒仍未完成 |
 | 只适合未来的缩小游戏 | CFR、CFR+、Discounted CFR、sequence-form LP、exact best response / exploitability | 都需要遍历或物化巨大博弈树；本机 `max_rounds=1` 的 CFR/CFR+ 构造和 NashConv 分别在 15 秒内未完成 |
 | 是框架，不是现成 solver | PSRO / PSRO v2 | 还必须提供可承受的 best-response oracle；精确 oracle 会枚举全树，RL oracle 又需要 tensor |
-| 当前不能正确运行 | IS-MCTS | 要求 `ResampleFromInfostate`；当前 game 未实现，实测直接报错 |
+| 当前不能正确运行 | IS-MCTS | Marshal 侧已有可重放采样器，但 OpenSpiel 接口要求双方视角；Fugitive 侧采样器和 `ResampleFromInfostate` 尚未实现 |
 | 当前不能运行 | Deep CFR、NFSP、DQN、PPO、AlphaZero 等神经方法 | OpenSpiel RL 环境要求 observation/information-state tensor；当前 game 只有字符串接口 |
 | 不应作为公平策略 | 普通 MCTS | 搜索真实 `State` 会看到玩家本不应知道的私有信息，只能作全知调试基线 |
 
@@ -130,6 +132,35 @@ PYTHONPATH=src:third_party/open_spiel:third_party/open_spiel/build/python \
 OpenSpiel 官方维护的完整算法列表见
 <https://openspiel.readthedocs.io/en/latest/algorithms.html>；上表是针对本 game 的筛选，
 不是 OpenSpiel 全部功能的列表。
+
+Route / Completion DP 的完整牌组可行性实验可直接运行：
+
+```bash
+third_party/open_spiel/build/games/fugitive_belief_experiment \
+  --samples_per_bucket 32 --seed_start 0 --max_seeds 1000
+```
+
+也可以扫描固定 seed 范围内的每个 Marshal 猜测边界，并分别汇总高 Route support、
+高隐藏 Sprint 和普通深局：
+
+```bash
+third_party/open_spiel/build/games/fugitive_belief_experiment \
+  --mode sweep --seed_start 0 --max_seeds 40
+```
+
+默认 `--replay_samples 1`，即每个记录状态采样并重放一次；只测计数性能时可显式设为
+`--replay_samples 0`。
+
+程序输出 JSON Lines。Route 层给出满足公开路线、历史猜测和已知抽牌截止时间的路线
+支持上界及仅用于诊断的 route-support 频率；Completion 层再分配隐藏 Sprint 身份和
+Fugitive 隐藏抽牌，并输出 history-weighted 单牌边缘。`uniform_consistent_history_mass`
+是不含 Fugitive 策略概率的相容 chance-history 质量，运行时用 `long double` 近似累计，
+不能称为真实后验。
+
+实验默认对每个收集到的信息状态按该质量采样一个完整隐藏历史，由 C++ engine 逐动作
+检查合法性并要求 Marshal information string 精确相等。这个 Marshal 侧采样器已经
+可用，但不能冒充双方通用的 OpenSpiel `ResampleFromInfostate`；后者还需要独立实现
+Fugitive 视角。
 
 实现、动作协议、序列化和算法选择的详细说明见
 [`docs/OPEN_SPIEL_INTEGRATION.md`](docs/OPEN_SPIEL_INTEGRATION.md)。

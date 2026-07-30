@@ -91,8 +91,6 @@ bool Contains(const std::vector<T>& values, const T& value) {
   return std::find(values.begin(), values.end(), value) != values.end();
 }
 
-bool CanBeSprint(int card) { return card != kMaxCard; }
-
 }  // namespace
 
 std::ostream& operator<<(std::ostream& stream, Phase phase) {
@@ -320,13 +318,6 @@ int FugitiveState::SetupPile() const {
   return setup_draw_index_ < 3 ? 0 : 1;
 }
 
-int FugitiveState::PileForCard(int card) const {
-  if (card >= 4 && card <= 14) return 0;
-  if (card >= 15 && card <= 28) return 1;
-  if (card >= 29 && card <= 41) return 2;
-  return -1;
-}
-
 std::array<int, 3> FugitiveState::PileSizes() const {
   std::array<int, 3> sizes = {0, 0, 0};
   for (int card = 4; card <= 41; ++card) {
@@ -346,13 +337,6 @@ std::vector<int> FugitiveState::NonemptyPiles() const {
 
 bool FugitiveState::CardInHand(Player player, int card) const {
   return Contains(hands_[player], card);
-}
-
-int FugitiveState::SprintValue(int card) {
-  SPIEL_CHECK_GE(card, kMinCard);
-  SPIEL_CHECK_LE(card, kMaxCard);
-  SPIEL_CHECK_TRUE(CanBeSprint(card));
-  return card % 2 == 0 ? 2 : 1;
 }
 
 int FugitiveState::SprintTotal(const std::vector<int>& cards) {
