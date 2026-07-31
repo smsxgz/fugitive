@@ -173,6 +173,22 @@ third_party/open_spiel/build/games/fugitive_belief_experiment \
   --manhunt_completion_calls 100000 --manhunt_particles 256
 ```
 
+跨采样 seed 的粒子收敛实验使用同一 RNG 前缀配对不同粒子数；最大粒子档只是参考，
+不是真值：
+
+```bash
+third_party/open_spiel/build/games/fugitive_belief_experiment \
+  --mode manhunt_convergence --manhunt_checkpoints 16 \
+  --manhunt_sample_seeds 16 --manhunt_particle_counts 64,128,256,512 \
+  --seed_start 0 --max_seeds 1000
+```
+
+16 个去重 Manhunt 入口、每个 16 条采样 seed 的初筛中，64 粒子与 512 粒子的配对
+首猜一致率只有 85.5%，value 平均绝对差为 0.0727；256 粒子也只有 93.0% 和 0.0282。
+全部 1,024 次经验 belief 求解都精确，但 512 粒子 p95 约 9.9 s，且多数状态的平均 value
+仍随粒子数增加而下降。因此 64 不能作为已通过收敛检查的默认值，512 也尚不能称为
+收敛真值；进入 N14 前应先复用 Completion 做批量采样，再把参考粒子数向上推。
+
 L1 Fugitive 对 L2 Marshal 的 guard/noguard 配对实验：
 
 ```bash

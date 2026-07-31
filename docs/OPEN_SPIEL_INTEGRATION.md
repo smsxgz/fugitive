@@ -525,6 +525,45 @@ Monte Carlo 误差，不是底层 belief 的置信区间。同一个 seed 1 状�
 复用根 Completion 和 route-class 结果的批量采样入口。现阶段保留简单接口并显式报告
 粒子数、求解状态和时间。
 
+#### 9.1.1 粒子数收敛检查
+
+`manhunt_convergence` 模式从现有随机合法 coverage rollout 收集每局第一个去重 Manhunt
+入口。它不是 L1/L2 的策略加权状态分布，只用于在一组真实可达状态上检查 evaluator。
+同一个 checkpoint 和 sampling seed 下，每个粒子档都重置相同 RNG，所以 N 个粒子是
+最大档的严格采样前缀。最大档只称 reference，不称 ground truth。
+
+离线检查把经验 belief solver 的 state budget 设为无限；主一致率和 value 差异只统计
+两边都 `exact_for_empirical_belief=true` 的配对。程序逐次输出 bounds、首猜、实际
+`rng_seed`、solver states 和时间；逐 checkpoint 汇总还保存完整 `information_state`，便于
+后续实现批量 sampler 时复用完全相同的 belief。逐 checkpoint 汇总 value 均值/标准差、modal 首猜，
+全局只汇总与 reference 的配对差异及成本，不把不同状态的原始 value 混成一个均值。
+
+复现命令：
+
+```bash
+third_party/open_spiel/build/games/fugitive_belief_experiment \
+  --mode manhunt_convergence --manhunt_checkpoints 16 \
+  --manhunt_sample_seeds 16 --manhunt_particle_counts 64,128,256,512 \
+  --seed_start 0 --max_seeds 1000
+```
+
+seed 0 开始检查 21 局后收集到 16 个入口；隐藏位置为 3--8，隐藏 Sprint 为 8--16。
+共 1,024 次经验 belief 求解全部 exact，结果为：
+
+| 粒子 | 对 512 首猜一致率 | value 平均绝对差 | value p95 绝对差 | 时间 p50 | 时间 p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 85.5% | 0.0727 | 0.1797 | 48 ms | 1.24 s |
+| 128 | 89.8% | 0.0523 | 0.1406 | 96 ms | 2.48 s |
+| 256 | 93.0% | 0.0282 | 0.0781 | 192 ms | 4.96 s |
+| 512 reference | 100% | 0 | 0 | 385 ms | 9.92 s |
+
+总墙钟 626 s，峰值 RSS 12,688 KiB。16 个状态中有 15 个的跨 seed 平均 value 从
+64 到 512 单调下降，剩余一个始终为 1；这与小样本上先对多个动作取最大值产生的乐观
+效应一致，也说明 512 本身尚未给出稳定极限。当前结论不是“改用 512”，而是：64 已经
+没有通过收敛检查，256 仍未达到 value 差异门槛，而更高粒子数被逐粒子重复 Completion
+的长尾挡住。下一步先做共享 Completion 的批量 sampler，再用更高 reference 重跑；
+在此之前不开始依赖连续 Manhunt value 的 N14。
+
 ### 9.2 L1/L2 配对实验
 
 `fugitive_baseline_experiment` 是独立 C++ runner，不接网页，也不恢复旧 Agent 框架。

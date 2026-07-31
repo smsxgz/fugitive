@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <random>
 #include <set>
@@ -41,6 +42,9 @@ struct Options {
   int replay_samples = 1;
   std::uint64_t manhunt_completion_calls = 0;
   int manhunt_particles = 0;
+  int manhunt_checkpoints = 64;
+  int manhunt_sample_seeds = 16;
+  std::vector<int> manhunt_particle_counts = {64, 128, 256, 512};
 };
 
 struct Bucket {
@@ -62,6 +66,24 @@ struct Measurements {
   std::vector<std::int64_t> pipeline_microseconds;
   std::vector<std::int64_t> sample_microseconds;
   std::vector<std::int64_t> replay_microseconds;
+};
+
+struct ManhuntCheckpoint {
+  std::uint64_t game_seed = 0;
+  std::string information_state;
+  MarshalBeliefInput input;
+  int route_length = 0;
+  int hidden_positions = 0;
+  int hidden_sprints = 0;
+};
+
+struct ManhuntConvergenceRun {
+  int best_guess = -1;
+  double lower_bound = 0.0;
+  double upper_bound = 1.0;
+  bool exact = false;
+  std::uint64_t solver_states = 0;
+  std::int64_t time_us = 0;
 };
 
 FugitiveState& AsFugitive(State* state) {
@@ -157,6 +179,16 @@ std::string Scientific(long double value) {
   return output.str();
 }
 
+std::uint64_t InformationStateSeed(std::uint64_t seed,
+                                   const std::string& information_state,
+                                   std::uint64_t salt) {
+  std::uint64_t hash = seed ^ 0x9e3779b97f4a7c15ULL;
+  for (unsigned char byte : information_state) {
+    hash = (hash ^ byte) * 1099511628211ULL;
+  }
+  return hash ^ salt;
+}
+
 json Evaluate(const FugitiveState& state,
               const std::string& information_state,
               std::int64_t information_state_microseconds,
@@ -197,10 +229,8 @@ json Evaluate(const FugitiveState& state,
   SPIEL_CHECK_LE(actual_route_result.uniform_consistent_history_mass,
                  completion_result.uniform_consistent_history_mass);
 
-  std::uint64_t sample_seed = seed ^ 0x9e3779b97f4a7c15ULL;
-  for (unsigned char byte : information_state) {
-    sample_seed = (sample_seed ^ byte) * 1099511628211ULL;
-  }
+  const std::uint64_t sample_seed =
+      InformationStateSeed(seed, information_state, /*salt=*/0);
   std::mt19937_64 sample_rng(sample_seed);
   auto uniform = [&sample_rng]() {
     return std::generate_canonical<double, 64>(sample_rng);
@@ -430,6 +460,44 @@ std::int64_t Percentile(std::vector<std::int64_t> values, double quantile) {
   return values[index];
 }
 
+double Percentile(std::vector<double> values, double quantile) {
+  SPIEL_CHECK_FALSE(values.empty());
+  std::sort(values.begin(), values.end());
+  const int index = std::max<int>(
+      0, static_cast<int>(std::ceil(quantile * values.size())) - 1);
+  return values[index];
+}
+
+double Mean(const std::vector<double>& values) {
+  SPIEL_CHECK_FALSE(values.empty());
+  long double total = 0.0L;
+  for (double value : values) total += value;
+  return static_cast<double>(total / values.size());
+}
+
+double SampleStandardDeviation(const std::vector<double>& values) {
+  if (values.size() < 2) return 0.0;
+  const long double mean = Mean(values);
+  long double squared_error = 0.0L;
+  for (double value : values) {
+    const long double error = value - mean;
+    squared_error += error * error;
+  }
+  return std::sqrt(
+      static_cast<double>(squared_error / (values.size() - 1)));
+}
+
+std::pair<int, int> Mode(const std::vector<int>& values) {
+  SPIEL_CHECK_FALSE(values.empty());
+  std::map<int, int> counts;
+  for (int value : values) ++counts[value];
+  std::pair<int, int> mode = *counts.begin();
+  for (const auto& [value, count] : counts) {
+    if (count > mode.second) mode = {value, count};
+  }
+  return mode;
+}
+
 json TimingDistribution(const std::vector<std::int64_t>& values) {
   if (values.empty()) return json::object();
   return {
@@ -438,6 +506,23 @@ json TimingDistribution(const std::vector<std::int64_t>& values) {
       {"p99", Percentile(values, 0.99)},
       {"max", *std::max_element(values.begin(), values.end())},
   };
+}
+
+std::vector<int> ParsePositiveIntList(const std::string& value) {
+  std::vector<int> result;
+  std::stringstream stream(value);
+  std::string item;
+  while (std::getline(stream, item, ',')) {
+    SPIEL_CHECK_FALSE(item.empty());
+    const int parsed = std::stoi(item);
+    SPIEL_CHECK_GT(parsed, 0);
+    result.push_back(parsed);
+  }
+  SPIEL_CHECK_FALSE(result.empty());
+  SPIEL_CHECK_TRUE(std::is_sorted(result.begin(), result.end()));
+  SPIEL_CHECK_TRUE(std::adjacent_find(result.begin(), result.end()) ==
+                   result.end());
+  return result;
 }
 
 void AddMeasurement(const json& record, Measurements* measurements) {
@@ -499,6 +584,12 @@ Options ParseOptions(int argc, char** argv) {
       options.manhunt_completion_calls = std::stoull(value);
     } else if (flag == "--manhunt_particles") {
       options.manhunt_particles = std::stoi(value);
+    } else if (flag == "--manhunt_checkpoints") {
+      options.manhunt_checkpoints = std::stoi(value);
+    } else if (flag == "--manhunt_sample_seeds") {
+      options.manhunt_sample_seeds = std::stoi(value);
+    } else if (flag == "--manhunt_particle_counts") {
+      options.manhunt_particle_counts = ParsePositiveIntList(value);
     } else {
       SpielFatalError("Unknown argument: " + flag);
     }
@@ -507,7 +598,11 @@ Options ParseOptions(int argc, char** argv) {
   SPIEL_CHECK_GT(options.max_seeds, 0);
   SPIEL_CHECK_GE(options.replay_samples, 0);
   SPIEL_CHECK_GE(options.manhunt_particles, 0);
-  SPIEL_CHECK_TRUE(options.mode == "fixed" || options.mode == "sweep");
+  SPIEL_CHECK_GT(options.manhunt_checkpoints, 0);
+  SPIEL_CHECK_GT(options.manhunt_sample_seeds, 0);
+  SPIEL_CHECK_GE(options.manhunt_particle_counts.size(), 2);
+  SPIEL_CHECK_TRUE(options.mode == "fixed" || options.mode == "sweep" ||
+                   options.mode == "manhunt_convergence");
   return options;
 }
 
@@ -723,8 +818,272 @@ int RunSweepExperiment(const Options& options) {
   return all.count > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+std::vector<ManhuntCheckpoint> CollectManhuntCheckpoints(
+    const Game& game, const Options& options, int* seeds_examined) {
+  std::vector<ManhuntCheckpoint> checkpoints;
+  std::set<std::string> information_states;
+  *seeds_examined = 0;
+
+  for (; *seeds_examined < options.max_seeds &&
+         checkpoints.size() < options.manhunt_checkpoints;
+       ++*seeds_examined) {
+    const std::uint64_t seed = options.seed_start + *seeds_examined;
+    std::mt19937_64 rng(seed);
+    std::unique_ptr<State> state = game.NewInitialState();
+
+    while (!state->IsTerminal()) {
+      const Phase phase = AsFugitive(state.get()).phase();
+      if (phase == Phase::kManhuntGuess) {
+        const std::string information_state =
+            state->InformationStateString(kMarshalPlayer);
+        if (information_states.insert(information_state).second) {
+          MarshalBeliefInput input =
+              BuildMarshalBeliefInput(information_state);
+          ManhuntCheckpoint checkpoint;
+          checkpoint.game_seed = seed;
+          checkpoint.information_state = information_state;
+          checkpoint.route_length = input.route.size();
+          for (const RoutePositionEvidence& position : input.route) {
+            if (position.known_hideout < 0) ++checkpoint.hidden_positions;
+            if (position.known_sprint_value < 0) {
+              checkpoint.hidden_sprints += position.sprint_count;
+            }
+          }
+          checkpoint.input = std::move(input);
+          checkpoints.push_back(std::move(checkpoint));
+        }
+        break;
+      }
+      if (phase == Phase::kMarshalGuess) {
+        ApplyMarshalGuess(state.get(), &rng);
+      } else {
+        AdvanceNonMarshalPhase(state.get(), &rng);
+      }
+    }
+  }
+  return checkpoints;
+}
+
+json SummarizeManhuntConvergenceRuns(
+    const std::vector<ManhuntConvergenceRun>& runs,
+    const std::vector<ManhuntConvergenceRun>& reference_runs,
+    bool include_checkpoint_distribution) {
+  SPIEL_CHECK_FALSE(runs.empty());
+  SPIEL_CHECK_EQ(runs.size(), reference_runs.size());
+
+  int exact = 0;
+  int paired_exact = 0;
+  int paired_guess_comparisons = 0;
+  int matching_guesses = 0;
+  std::vector<double> exact_values;
+  std::vector<double> absolute_errors;
+  std::vector<int> guesses;
+  std::vector<std::int64_t> times;
+  std::vector<std::int64_t> solver_states;
+  for (int index = 0; index < runs.size(); ++index) {
+    const ManhuntConvergenceRun& run = runs[index];
+    const ManhuntConvergenceRun& reference = reference_runs[index];
+    exact += run.exact;
+    guesses.push_back(run.best_guess);
+    times.push_back(run.time_us);
+    solver_states.push_back(run.solver_states);
+    if (run.exact) exact_values.push_back(run.lower_bound);
+    if (run.exact && reference.exact) {
+      ++paired_exact;
+      ++paired_guess_comparisons;
+      matching_guesses += run.best_guess == reference.best_guess;
+      absolute_errors.push_back(
+          std::abs(run.lower_bound - reference.lower_bound));
+    }
+  }
+
+  json value_error = nullptr;
+  if (!absolute_errors.empty()) {
+    value_error = {
+        {"mean", Mean(absolute_errors)},
+        {"p90", Percentile(absolute_errors, 0.90)},
+        {"p95", Percentile(absolute_errors, 0.95)},
+        {"max", *std::max_element(absolute_errors.begin(),
+                                  absolute_errors.end())},
+    };
+  }
+  json result = {
+      {"evaluations", runs.size()},
+      {"exact_for_empirical_belief", exact},
+      {"exact_for_empirical_belief_rate",
+       static_cast<double>(exact) / runs.size()},
+      {"paired_exact_best_guess_comparisons", paired_guess_comparisons},
+      {"paired_best_guess_matches", matching_guesses},
+      {"paired_best_guess_agreement",
+       paired_guess_comparisons == 0
+           ? 0.0
+           : static_cast<double>(matching_guesses) /
+                 paired_guess_comparisons},
+      {"paired_exact_value_comparisons", paired_exact},
+      {"paired_absolute_value_difference", value_error},
+      {"time_us", TimingDistribution(times)},
+      {"solver_states", TimingDistribution(solver_states)},
+  };
+  if (include_checkpoint_distribution) {
+    const auto [modal_guess, modal_count] = Mode(guesses);
+    json value = nullptr;
+    if (!exact_values.empty()) {
+      value = {
+          {"mean", Mean(exact_values)},
+          {"sample_standard_deviation",
+           SampleStandardDeviation(exact_values)},
+      };
+    }
+    result["value"] = value;
+    result["modal_best_guess"] = modal_guess;
+    result["modal_best_guess_count"] = modal_count;
+    result["modal_best_guess_share"] =
+        static_cast<double>(modal_count) / guesses.size();
+    result["distinct_best_guesses"] =
+        std::set<int>(guesses.begin(), guesses.end()).size();
+  }
+  return result;
+}
+
+int RunManhuntConvergenceExperiment(const Options& options) {
+  const auto game =
+      LoadGame("fugitive", {{"max_rounds", GameParameter(50)}});
+  const Clock::time_point experiment_start = Clock::now();
+  int seeds_examined = 0;
+  const std::vector<ManhuntCheckpoint> checkpoints =
+      CollectManhuntCheckpoints(*game, options, &seeds_examined);
+  const int reference_particles = options.manhunt_particle_counts.back();
+  std::vector<std::vector<ManhuntConvergenceRun>> all_runs(
+      options.manhunt_particle_counts.size());
+  std::vector<std::vector<ManhuntConvergenceRun>> all_reference_runs(
+      options.manhunt_particle_counts.size());
+
+  for (int checkpoint_index = 0; checkpoint_index < checkpoints.size();
+       ++checkpoint_index) {
+    const ManhuntCheckpoint& checkpoint = checkpoints[checkpoint_index];
+    std::vector<std::vector<ManhuntConvergenceRun>> runs(
+        options.manhunt_particle_counts.size());
+
+    for (int sample_seed = 0; sample_seed < options.manhunt_sample_seeds;
+         ++sample_seed) {
+      const std::uint64_t rng_seed = InformationStateSeed(
+          sample_seed, checkpoint.information_state,
+          /*salt=*/0xd1b54a32d192ed03ULL);
+      for (int particle_index = 0;
+           particle_index < options.manhunt_particle_counts.size();
+           ++particle_index) {
+        const int particles = options.manhunt_particle_counts[particle_index];
+        std::mt19937_64 rng(rng_seed);
+        auto uniform = [&rng]() {
+          return std::generate_canonical<double, 64>(rng);
+        };
+        const Clock::time_point start = Clock::now();
+        const MarshalSampledManhuntResult value =
+            ComputeSampledManhuntValue(
+                checkpoint.input, uniform,
+                MarshalSampledManhuntOptions{
+                    /*particles=*/particles,
+                    /*max_solver_states=*/0});
+        ManhuntConvergenceRun run;
+        run.best_guess = value.best_guess;
+        run.lower_bound = static_cast<double>(value.lower_bound);
+        run.upper_bound = static_cast<double>(value.upper_bound);
+        run.exact = value.exact_for_empirical_belief;
+        run.solver_states = value.solver_states;
+        run.time_us = Microseconds(start, Clock::now());
+        runs[particle_index].push_back(run);
+
+        const json record = {
+            {"type", "manhunt_convergence_run"},
+            {"checkpoint", checkpoint_index},
+            {"game_seed", checkpoint.game_seed},
+            {"sample_seed", sample_seed},
+            {"rng_seed", rng_seed},
+            {"particles", particles},
+            {"best_guess", run.best_guess},
+            {"lower_bound", run.lower_bound},
+            {"upper_bound", run.upper_bound},
+            {"exact_for_empirical_belief", run.exact},
+            {"solver_states", run.solver_states},
+            {"time_us", run.time_us},
+        };
+        std::cout << record.dump() << '\n';
+      }
+    }
+
+    const std::vector<ManhuntConvergenceRun>& reference_runs = runs.back();
+    json by_particles;
+    for (int particle_index = 0;
+         particle_index < options.manhunt_particle_counts.size();
+         ++particle_index) {
+      const std::string key =
+          std::to_string(options.manhunt_particle_counts[particle_index]);
+      by_particles[key] = SummarizeManhuntConvergenceRuns(
+          runs[particle_index], reference_runs,
+          /*include_checkpoint_distribution=*/true);
+      all_runs[particle_index].insert(all_runs[particle_index].end(),
+                                      runs[particle_index].begin(),
+                                      runs[particle_index].end());
+      all_reference_runs[particle_index].insert(
+          all_reference_runs[particle_index].end(), reference_runs.begin(),
+          reference_runs.end());
+    }
+    const json checkpoint_summary = {
+        {"type", "manhunt_convergence_checkpoint"},
+        {"checkpoint", checkpoint_index},
+        {"game_seed", checkpoint.game_seed},
+        {"information_state", checkpoint.information_state},
+        {"route_length", checkpoint.route_length},
+        {"hidden_positions", checkpoint.hidden_positions},
+        {"hidden_sprints", checkpoint.hidden_sprints},
+        {"reference_particles", reference_particles},
+        {"by_particles", by_particles},
+    };
+    std::cout << checkpoint_summary.dump() << '\n';
+  }
+
+  json by_particles;
+  for (int particle_index = 0;
+       particle_index < options.manhunt_particle_counts.size();
+       ++particle_index) {
+    if (all_runs[particle_index].empty()) continue;
+    const std::string key =
+        std::to_string(options.manhunt_particle_counts[particle_index]);
+    by_particles[key] = SummarizeManhuntConvergenceRuns(
+        all_runs[particle_index], all_reference_runs[particle_index],
+        /*include_checkpoint_distribution=*/false);
+  }
+  const bool complete =
+      checkpoints.size() == static_cast<std::size_t>(options.manhunt_checkpoints);
+  const json summary = {
+      {"type", "summary"},
+      {"mode", "manhunt_convergence"},
+      {"belief_model", "uniform_consistent_chance_histories"},
+      {"checkpoint_kind", "manhunt_entry"},
+      {"checkpoint_collection_policy", "random_rollout_v1"},
+      {"requested_checkpoints", options.manhunt_checkpoints},
+      {"collected_checkpoints", checkpoints.size()},
+      {"sample_seeds_per_checkpoint", options.manhunt_sample_seeds},
+      {"particle_counts", options.manhunt_particle_counts},
+      {"reference_particles", reference_particles},
+      {"reference_is_ground_truth", false},
+      {"smaller_particle_sets_are_reference_prefixes", true},
+      {"seed_start", options.seed_start},
+      {"seeds_examined", seeds_examined},
+      {"max_seeds", options.max_seeds},
+      {"by_particles", by_particles},
+      {"elapsed_ms", Microseconds(experiment_start, Clock::now()) / 1000},
+      {"complete", complete},
+  };
+  std::cout << summary.dump() << '\n';
+  return complete ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 int RunExperiment(const Options& options) {
   if (options.mode == "sweep") return RunSweepExperiment(options);
+  if (options.mode == "manhunt_convergence") {
+    return RunManhuntConvergenceExperiment(options);
+  }
   return RunFixedExperiment(options);
 }
 
