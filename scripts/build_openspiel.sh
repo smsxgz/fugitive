@@ -45,7 +45,7 @@ fi
 
 "${CONDA}" run -n openspiel cmake --build "${BUILD_DIR}" \
   --target fugitive_test fugitive_belief_test fugitive_belief_experiment \
-  pyspiel \
+  fugitive_baseline_experiment pyspiel \
   --parallel "${BUILD_JOBS}"
 "${CONDA}" run -n openspiel ctest --test-dir "${BUILD_DIR}" \
   --output-on-failure --tests-regex '^fugitive(_belief)?_test$'

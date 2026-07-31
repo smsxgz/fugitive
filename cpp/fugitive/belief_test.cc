@@ -261,6 +261,71 @@ void TestSamplingMatchesWeightedMarginals() {
   }
 }
 
+void TestUniformConsistentManhuntValue() {
+  MarshalBeliefInput input = TwoPositionInput();
+  input.phase = Phase::kManhuntGuess;
+  input.fugitive_draw_rounds = {};
+  input.fugitive_draw_rounds[0] = {0};
+
+  const MarshalRevealResult reveal =
+      ComputeMarshalRevealOutcomes(input, /*card=*/2);
+  SPIEL_CHECK_TRUE(reveal.exact);
+  SPIEL_CHECK_EQ(reveal.total_success_history_mass, 24.0L);
+  SPIEL_CHECK_EQ(reveal.enumerated_history_mass, 24.0L);
+  SPIEL_CHECK_EQ(reveal.outcomes.size(), 2);
+  std::array<long double, 2> position_mass{};
+  for (const MarshalRevealOutcome& outcome : reveal.outcomes) {
+    SPIEL_CHECK_TRUE(outcome.sprint_cards.empty());
+    position_mass[outcome.route_position] +=
+        outcome.uniform_consistent_history_mass;
+  }
+  SPIEL_CHECK_EQ(position_mass[0], 13.0L);
+  SPIEL_CHECK_EQ(position_mass[1], 11.0L);
+
+  const MarshalManhuntResult value =
+      ComputeUniformConsistentManhuntValue(
+          input, MarshalManhuntOptions{
+                     /*max_completion_calls=*/0,
+                     /*max_solver_states=*/0});
+  SPIEL_CHECK_TRUE(value.exact);
+  SPIEL_CHECK_EQ(value.best_guess, 2);
+  SPIEL_CHECK_LE(std::abs(value.lower_bound - 22.0L / 39.0L), 1e-15L);
+  SPIEL_CHECK_LE(std::abs(value.upper_bound - value.lower_bound), 1e-15L);
+
+  MarshalBeliefInput sprint_input = input;
+  sprint_input.route[0].sprint_count = 1;
+  const MarshalRevealResult sprint_reveal =
+      ComputeMarshalRevealOutcomes(sprint_input, /*card=*/2);
+  SPIEL_CHECK_TRUE(sprint_reveal.exact);
+  SPIEL_CHECK_GT(sprint_reveal.outcomes.size(), 2);
+  SPIEL_CHECK_EQ(sprint_reveal.total_success_history_mass,
+                 sprint_reveal.enumerated_history_mass);
+  for (const MarshalRevealOutcome& outcome : sprint_reveal.outcomes) {
+    SPIEL_CHECK_EQ(outcome.sprint_cards.size(),
+                   outcome.route_position == 0 ? 1 : 0);
+  }
+
+  const MarshalManhuntResult sprint_value =
+      ComputeUniformConsistentManhuntValue(
+          sprint_input, MarshalManhuntOptions{
+                            /*max_completion_calls=*/0,
+                            /*max_solver_states=*/0});
+  SPIEL_CHECK_TRUE(sprint_value.exact);
+
+  std::mt19937_64 generator(29);
+  auto rng = [&generator]() {
+    return std::generate_canonical<double, 64>(generator);
+  };
+  const MarshalSampledManhuntResult sampled = ComputeSampledManhuntValue(
+      sprint_input, rng,
+      MarshalSampledManhuntOptions{/*particles=*/3900,
+                                   /*max_solver_states=*/0});
+  SPIEL_CHECK_TRUE(sampled.exact_for_empirical_belief);
+  SPIEL_CHECK_EQ(sampled.best_guess, sprint_value.best_guess);
+  SPIEL_CHECK_LE(std::abs(sampled.lower_bound - sprint_value.lower_bound),
+                 0.03L);
+}
+
 }  // namespace
 }  // namespace fugitive
 }  // namespace open_spiel
@@ -273,4 +338,5 @@ int main(int argc, char** argv) {
   open_spiel::fugitive::TestCompletionCounting();
   open_spiel::fugitive::TestSampledHistoriesReplay();
   open_spiel::fugitive::TestSamplingMatchesWeightedMarginals();
+  open_spiel::fugitive::TestUniformConsistentManhuntValue();
 }

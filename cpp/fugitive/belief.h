@@ -91,6 +91,65 @@ struct MarshalHistorySample {
   std::array<std::vector<int>, 3> fugitive_draw_cards;
 };
 
+// One public observation after a successful Manhunt guess. route_position is
+// zero-based in MarshalBeliefInput::route.
+struct MarshalRevealOutcome {
+  int route_position = -1;
+  std::vector<int> sprint_cards;
+  long double uniform_consistent_history_mass = 0.0L;
+};
+
+struct MarshalRevealResult {
+  std::vector<MarshalRevealOutcome> outcomes;
+  long double total_success_history_mass = 0.0L;
+  long double enumerated_history_mass = 0.0L;
+  std::uint64_t completion_calls = 0;
+  bool exact = false;
+};
+
+struct MarshalManhuntOptions {
+  // Zero means unlimited. Finite defaults prevent an unexpected information
+  // state from blocking an online caller indefinitely.
+  std::uint64_t max_completion_calls = 10000;
+  std::uint64_t max_solver_states = 1000;
+};
+
+struct MarshalManhuntResult {
+  long double lower_bound = 0.0L;
+  long double upper_bound = 1.0L;
+  // When inexact, maximizes the proven lower bound, breaking ties by upper
+  // bound.
+  int best_guess = -1;
+  std::uint64_t solver_states = 0;
+  std::uint64_t solver_cache_hits = 0;
+  std::uint64_t completion_calls = 0;
+  std::uint64_t completion_cache_hits = 0;
+  std::uint64_t positive_reveal_outcomes = 0;
+  bool exact = false;
+};
+
+struct MarshalSampledManhuntOptions {
+  int particles = 256;
+  // Zero means unlimited. This budget applies only to the finite empirical
+  // belief tree, after the particles have been sampled.
+  std::uint64_t max_solver_states = 100000;
+};
+
+struct MarshalSampledManhuntResult {
+  // Bounds for the finite empirical belief only. They are not confidence
+  // bounds for the underlying uniform-consistent belief.
+  long double lower_bound = 0.0L;
+  long double upper_bound = 1.0L;
+  // When truncated, uses the same lower-bound rule as MarshalManhuntResult.
+  int best_guess = -1;
+  int particles = 0;
+  std::uint64_t solver_states = 0;
+  std::uint64_t solver_cache_hits = 0;
+  // True means exact for the sampled empirical belief. Sampling error relative
+  // to the underlying uniform-consistent belief remains.
+  bool exact_for_empirical_belief = false;
+};
+
 // Counts route assignments that satisfy all public route/guess constraints and
 // the draw deadlines of Hideouts and already-revealed Sprint cards. Hidden
 // Sprint identities are not assigned yet, so this is an upper bound on fully
@@ -103,6 +162,28 @@ MarshalCompletionResult ComputeMarshalCompletion(
     const MarshalBeliefInput& input);
 MarshalHistorySample SampleMarshalHistory(const MarshalBeliefInput& input,
                                           std::function<double()> rng);
+
+// Splits the successful mass of one Manhunt guess by the exact public reveal
+// (route position and Sprint identities). A finite call budget may return a
+// partial list; exact is true only when all outcomes were enumerated.
+MarshalRevealResult ComputeMarshalRevealOutcomes(
+    const MarshalBeliefInput& input, int card,
+    std::uint64_t max_completion_calls = 10000);
+
+// Solves Manhunt under the uniform-consistent history measure. When a budget
+// is exhausted, returns a rigorous interval and exact=false rather than
+// renormalizing partial mass.
+MarshalManhuntResult ComputeUniformConsistentManhuntValue(
+    const MarshalBeliefInput& input,
+    const MarshalManhuntOptions& options = MarshalManhuntOptions{});
+
+// Samples complete histories independently, then solves the finite empirical
+// Manhunt belief. The solver does not claim a confidence interval for the
+// underlying uniform-consistent belief.
+MarshalSampledManhuntResult ComputeSampledManhuntValue(
+    const MarshalBeliefInput& input, std::function<double()> rng,
+    const MarshalSampledManhuntOptions& options =
+        MarshalSampledManhuntOptions{});
 
 // Rebuilds a state from public information and a sampled hidden history. Every
 // action is checked for legality, and the resulting Marshal information state

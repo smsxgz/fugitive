@@ -23,9 +23,9 @@ OpenSpiel game；Python 只保留薄适配层和本地对局网页。
 | 路径 | 本项目维护的内容 |
 | --- | --- |
 | [`cpp/fugitive/fugitive.h`](cpp/fugitive/fugitive.h)、[`fugitive.cc`](cpp/fugitive/fugitive.cc) | OpenSpiel game、state、规则、动作、信息状态和序列化接口 |
-| [`cpp/fugitive/belief.h`](cpp/fugitive/belief.h)、[`belief.cc`](cpp/fugitive/belief.cc) | 只读取 Marshal information state 的 Route / Completion DP、加权边缘、隐藏历史采样与重放 |
+| [`cpp/fugitive/belief.h`](cpp/fugitive/belief.h)、[`belief.cc`](cpp/fugitive/belief.cc) | 只读取 Marshal information state 的 Route / Completion DP、加权边缘、隐藏历史采样、重放与 Manhunt evaluator |
 | [`cpp/fugitive/fugitive_test.cc`](cpp/fugitive/fugitive_test.cc)、[`belief_test.cc`](cpp/fugitive/belief_test.cc) | C++ 规则、OpenSpiel 契约和 DP 核心语义测试 |
-| [`cpp/fugitive/belief_experiment.cc`](cpp/fugitive/belief_experiment.cc) | 完整牌组的固定回归与全 Marshal 决策点 belief sweep |
+| [`cpp/fugitive/belief_experiment.cc`](cpp/fugitive/belief_experiment.cc)、[`baseline_experiment.cc`](cpp/fugitive/baseline_experiment.cc) | 完整牌组 belief profile，以及 L1/L2 配对 seed 对局实验 |
 | [`src/fugitive`](src/fugitive) | Python 包入口，以及网页对 `pyspiel.State` 的薄适配层和静态前端 |
 | [`tests`](tests) | Python/OpenSpiel 集成测试和网页适配测试 |
 | [`examples/train_outcome_sampling.py`](examples/train_outcome_sampling.py) | 调用 OpenSpiel C++ outcome-sampling MCCFR 的最小实验入口 |
@@ -161,6 +161,62 @@ Fugitive 隐藏抽牌，并输出 history-weighted 单牌边缘。`uniform_consi
 检查合法性并要求 Marshal information string 精确相等。这个 Marshal 侧采样器已经
 可用，但不能冒充双方通用的 OpenSpiel `ResampleFromInfostate`；后者还需要独立实现
 Fugitive 视角。
+
+Manhunt 有两种 evaluator：小状态精确参考会按
+`(route_position, exact_sprint_cards)` 枚举成功观察；完整对局版本先采样完整隐藏历史，
+再精确求解有限的经验 belief 树。后者的上下界只属于这批粒子，不是底层 belief 的
+统计置信区间。可在真实 Manhunt checkpoint 上同时 profile 两者：
+
+```bash
+third_party/open_spiel/build/games/fugitive_belief_experiment \
+  --samples_per_bucket 1 --seed_start 1 --max_seeds 1 --replay_samples 0 \
+  --manhunt_completion_calls 100000 --manhunt_particles 256
+```
+
+L1 Fugitive 对 L2 Marshal 的 guard/noguard 配对实验：
+
+```bash
+third_party/open_spiel/build/games/fugitive_baseline_experiment \
+  --games 1000 --seed_start 0 --max_rounds 50 --manhunt_particles 64 \
+  --guess_mode argmax_only --low_exhausted lift --dead_card_sprints 1
+```
+
+Fugitive-L1 会在 42 已经是合法动作时优先打出它，并复用 engine 的合法动作与最少
+Sprint 选择。`--dead_card_sprints K` 允许它在普通、非 42 的出牌中额外倾倒至多 K 张
+已经满足 `card <= previous_hideout` 的死牌；K 只能是 0、1、2，默认 0 以保持旧 L1
+实验可复现。本轮主变体 K=1 优先消耗价值 1 的奇数死牌，选好后按数字升序提交，
+每一步仍以 engine 的 `LegalActions()` 为准。
+
+Marshal guard 先构造实际 unrestricted 猜测集；若它不能直接覆盖全部隐藏位置，则优先
+限制在 `<30`。低牌全部为零概率时，`--low_exhausted lift` 放开限制，`wait` 则明确
+猜一张零概率牌作为策略性等待；后者不是 engine Pass。JSON 中
+`unrestricted_argmax_ge_30_turns` 记录阈值进入 belief 决策的次数，
+`guard_restriction` 只统计 `<30` 重建真正改变猜测集的次数。
+
+Marshal 的 `--guess_mode` 有三种：`argmax_only` 只提交一个正概率 argmax；
+`certain_only` 在存在概率为 1 的牌时只提交全部确定项，否则退化为单 argmax；默认的
+`certain_plus_argmax` 提交全部确定项，并在尚未覆盖全部隐藏位置时追加一个非确定
+argmax。旧 `--add_certain_guesses 0|1` 仍作为前后两种模式的兼容别名。
+
+相同的 seed 0--999 上，旧 L1
+（K=0）的最高边缘从未到达 30，guard 也从未改变动作；K=1 后，guard 一侧的 7,027 个
+普通猜测节点中有 104 个 unrestricted argmax 不小于 30，并有 25 次 `<30` 重建真正
+改变动作。K=1 的 guard/noguard 分别为 `971 M / 29 F` 和 `973 M / 27 F`，K=2 分别为
+`972 M / 28 F` 和 `971 M / 29 F`，均无 timeout。
+
+扩大到 10,000 seed 后，K=1 guard/noguard 分别为 `9743 M / 257 F` 和
+`9736 M / 264 F`。47 个配对 seed 的胜者不同，其中 guard 独赢 27 局、noguard 独赢
+20 局；净差很小，且 1,000 seed 时方向相反。因此当前结论只是“死牌 Sprint 已让 N11
+进入真实决策路径”，还不能据此声称 guard 有稳定胜率优势。`wait` 在 50/100/200 的
+同一 7 局中持续到 horizon，属于策略循环，不作为主结果。
+
+强制赌博消融固定 K=1、`low_exhausted=lift`，并以不受 30 guard 干预的 noguard 一侧
+作为主口径。10,000 seed 中，`argmax_only / certain_only /
+certain_plus_argmax` 的 Marshal 胜局分别为 `9736 / 9930 / 9998`，平均回合为
+`7.00 / 6.33 / 5.01`。plus 模式的 8,872 次强制赌博有 2,930 次失败，丢掉 3,504 张
+本可确定揭示的牌，但其快速 cover-all 收益在当前对手上明显大于局部损失。因此强制
+赌博不是免费动作，却是当前 L1-smoke matchup 中最强的三种变体；这不构成对更强
+Fugitive 或最优策略的证明。
 
 实现、动作协议、序列化和算法选择的详细说明见
 [`docs/OPEN_SPIEL_INTEGRATION.md`](docs/OPEN_SPIEL_INTEGRATION.md)。

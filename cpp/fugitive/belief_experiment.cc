@@ -39,6 +39,8 @@ struct Options {
   std::uint64_t seed_start = 0;
   int max_seeds = 10000;
   int replay_samples = 1;
+  std::uint64_t manhunt_completion_calls = 0;
+  int manhunt_particles = 0;
 };
 
 struct Bucket {
@@ -159,7 +161,8 @@ json Evaluate(const FugitiveState& state,
               const std::string& information_state,
               std::int64_t information_state_microseconds,
               const std::string& checkpoint, std::uint64_t seed,
-              int replay_samples) {
+              int replay_samples, std::uint64_t manhunt_completion_calls,
+              int manhunt_particles) {
   const Clock::time_point parse_start = Clock::now();
   const MarshalBeliefInput input = BuildMarshalBeliefInput(information_state);
   const Clock::time_point completion_start = Clock::now();
@@ -212,6 +215,53 @@ json Evaluate(const FugitiveState& state,
     const Clock::time_point replay_end = Clock::now();
     sample_microseconds += Microseconds(sample_start, replay_start);
     replay_microseconds += Microseconds(replay_start, replay_end);
+  }
+
+  json manhunt = nullptr;
+  if (input.phase == Phase::kManhuntGuess &&
+      manhunt_completion_calls > 0) {
+    const Clock::time_point manhunt_start = Clock::now();
+    const MarshalManhuntResult result =
+        ComputeUniformConsistentManhuntValue(
+            input, MarshalManhuntOptions{
+                       /*max_completion_calls=*/manhunt_completion_calls,
+                       /*max_solver_states=*/1000});
+    manhunt = {
+        {"lower_bound", static_cast<double>(result.lower_bound)},
+        {"upper_bound", static_cast<double>(result.upper_bound)},
+        {"best_guess", result.best_guess},
+        {"exact", result.exact},
+        {"solver_states", result.solver_states},
+        {"solver_cache_hits", result.solver_cache_hits},
+        {"completion_calls", result.completion_calls},
+        {"completion_cache_hits", result.completion_cache_hits},
+        {"positive_reveal_outcomes", result.positive_reveal_outcomes},
+        {"time_us", Microseconds(manhunt_start, Clock::now())},
+    };
+  }
+
+  json sampled_manhunt = nullptr;
+  if (input.phase == Phase::kManhuntGuess && manhunt_particles > 0) {
+    std::mt19937_64 manhunt_rng(sample_seed ^ 0xd1b54a32d192ed03ULL);
+    auto manhunt_uniform = [&manhunt_rng]() {
+      return std::generate_canonical<double, 64>(manhunt_rng);
+    };
+    const Clock::time_point manhunt_start = Clock::now();
+    const MarshalSampledManhuntResult result = ComputeSampledManhuntValue(
+        input, manhunt_uniform,
+        MarshalSampledManhuntOptions{
+            /*particles=*/manhunt_particles,
+            /*max_solver_states=*/100000});
+    sampled_manhunt = {
+        {"lower_bound", static_cast<double>(result.lower_bound)},
+        {"upper_bound", static_cast<double>(result.upper_bound)},
+        {"best_guess", result.best_guess},
+        {"particles", result.particles},
+        {"solver_states", result.solver_states},
+        {"solver_cache_hits", result.solver_cache_hits},
+        {"exact_for_empirical_belief", result.exact_for_empirical_belief},
+        {"time_us", Microseconds(manhunt_start, Clock::now())},
+    };
   }
 
   int hidden_positions = 0;
@@ -319,6 +369,8 @@ json Evaluate(const FugitiveState& state,
       {"sample_us", sample_microseconds},
       {"replay_us", replay_microseconds},
       {"sample_replay_checked", replay_samples > 0},
+      {"manhunt", manhunt},
+      {"sampled_manhunt", sampled_manhunt},
       {"oracle_us", Microseconds(oracle_start, oracle_end)},
       {"route_memo_states", route_result.memo_states},
       {"route_memo_cache_hits", route_result.memo_hits},
@@ -443,6 +495,10 @@ Options ParseOptions(int argc, char** argv) {
       options.max_seeds = std::stoi(value);
     } else if (flag == "--replay_samples") {
       options.replay_samples = std::stoi(value);
+    } else if (flag == "--manhunt_completion_calls") {
+      options.manhunt_completion_calls = std::stoull(value);
+    } else if (flag == "--manhunt_particles") {
+      options.manhunt_particles = std::stoi(value);
     } else {
       SpielFatalError("Unknown argument: " + flag);
     }
@@ -450,6 +506,7 @@ Options ParseOptions(int argc, char** argv) {
   SPIEL_CHECK_GT(options.samples_per_bucket, 0);
   SPIEL_CHECK_GT(options.max_seeds, 0);
   SPIEL_CHECK_GE(options.replay_samples, 0);
+  SPIEL_CHECK_GE(options.manhunt_particles, 0);
   SPIEL_CHECK_TRUE(options.mode == "fixed" || options.mode == "sweep");
   return options;
 }
@@ -493,7 +550,8 @@ int RunFixedExperiment(const Options& options) {
             json record = Evaluate(
                 AsFugitive(state.get()), information_state,
                 information_state_microseconds, bucket->name, seed,
-                options.replay_samples);
+                options.replay_samples, options.manhunt_completion_calls,
+                options.manhunt_particles);
             bucket->route_microseconds.push_back(
                 record.at("route_us").get<std::int64_t>());
             bucket->completion_microseconds.push_back(
@@ -552,6 +610,8 @@ int RunFixedExperiment(const Options& options) {
       {"mode", "fixed"},
       {"samples_per_bucket", options.samples_per_bucket},
       {"replay_samples", options.replay_samples},
+      {"manhunt_completion_calls", options.manhunt_completion_calls},
+      {"manhunt_particles", options.manhunt_particles},
       {"seed_start", options.seed_start},
       {"seeds_examined", seeds_examined},
       {"collected", collected},
@@ -602,7 +662,8 @@ int RunSweepExperiment(const Options& options) {
           json record = Evaluate(
               AsFugitive(state.get()), information_state,
               information_state_microseconds, "sweep", seed,
-              options.replay_samples);
+              options.replay_samples, options.manhunt_completion_calls,
+              options.manhunt_particles);
           AddMeasurement(record, &all);
 
           const bool normal_guess = phase == Phase::kMarshalGuess;
@@ -637,6 +698,8 @@ int RunSweepExperiment(const Options& options) {
       {"type", "summary"},
       {"mode", "sweep"},
       {"replay_samples", options.replay_samples},
+      {"manhunt_completion_calls", options.manhunt_completion_calls},
+      {"manhunt_particles", options.manhunt_particles},
       {"seed_start", options.seed_start},
       {"seeds_examined", options.max_seeds},
       {"marshal_boundaries", marshal_boundaries},

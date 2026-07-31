@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -716,6 +717,464 @@ void ApplyChecked(State* state, Action action) {
   state->ApplyAction(action);
 }
 
+void AppendKeyInt(std::string* key, std::uint64_t value, int bytes) {
+  for (int index = 0; index < bytes; ++index) {
+    key->push_back(static_cast<char>(value & 0xff));
+    value >>= 8;
+  }
+}
+
+std::string MarshalBeliefKey(const MarshalBeliefInput& input) {
+  std::string key;
+  key.reserve(32 + 16 * input.route.size());
+  AppendKeyInt(&key, static_cast<int>(input.phase), 1);
+  AppendKeyInt(&key, input.route.size(), 1);
+  for (const RoutePositionEvidence& position : input.route) {
+    AppendKeyInt(&key, position.known_hideout + 1, 1);
+    AppendKeyInt(&key, position.sprint_count, 1);
+    AppendKeyInt(&key, position.known_sprint_value + 1, 1);
+    AppendKeyInt(&key, position.play_round, 4);
+    for (int count : position.known_sprint_draws) {
+      AppendKeyInt(&key, count, 1);
+    }
+    AppendKeyInt(&key, position.known_sprint_cards.size(), 1);
+    for (int card : position.known_sprint_cards) {
+      AppendKeyInt(&key, card, 1);
+    }
+  }
+  for (const auto& rounds : input.fugitive_draw_rounds) {
+    AppendKeyInt(&key, rounds.size(), 1);
+    for (int round : rounds) AppendKeyInt(&key, round, 4);
+  }
+  AppendKeyInt(&key, input.unavailable_cards, 8);
+  AppendKeyInt(&key, input.failed_guesses.size(), 1);
+  for (const FailedGuessEvidence& guess : input.failed_guesses) {
+    AppendKeyInt(&key, guess.route_length, 1);
+    AppendKeyInt(&key, guess.numbers.size(), 1);
+    for (int number : guess.numbers) AppendKeyInt(&key, number, 1);
+  }
+  return key;
+}
+
+int HiddenHideoutCount(const MarshalBeliefInput& input) {
+  return std::count_if(input.route.begin(), input.route.end(),
+                       [](const RoutePositionEvidence& position) {
+                         return position.known_hideout < 0;
+                       });
+}
+
+struct ConditionedRevealOutcome {
+  MarshalRevealOutcome observation;
+  MarshalBeliefInput input;
+};
+
+struct RevealEnumeration {
+  std::vector<ConditionedRevealOutcome> outcomes;
+  long double total_success_mass = 0.0L;
+  long double enumerated_mass = 0.0L;
+  bool exact = false;
+};
+
+struct ValueBounds {
+  long double lower = 0.0L;
+  long double upper = 1.0L;
+  int best_guess = -1;
+};
+
+bool EqualBounds(const ValueBounds& bounds) {
+  return bounds.upper - bounds.lower <= 1e-15L;
+}
+
+class ManhuntSolver {
+ public:
+  explicit ManhuntSolver(MarshalManhuntOptions options)
+      : options_(options) {}
+
+  RevealEnumeration RevealOutcomes(const MarshalBeliefInput& input,
+                                   int card) {
+    SPIEL_CHECK_GE(card, kMinCard);
+    SPIEL_CHECK_LE(card, 41);
+    RevealEnumeration result;
+    const MarshalCompletionResult* base = Completion(input);
+    if (base == nullptr) return result;
+    result.total_success_mass = base->hidden_card_history_mass[card];
+    if (result.total_success_mass == 0.0L) {
+      result.exact = true;
+      return result;
+    }
+
+    const std::vector<int> candidates = SprintCandidates(input, card);
+    for (int position = 0; position < input.route.size(); ++position) {
+      if (input.route[position].known_hideout >= 0) continue;
+      std::vector<int> selected;
+      if (!EnumerateSprintSets(input, card, position, candidates,
+                               /*candidate_index=*/0,
+                               input.route[position].sprint_count, &selected,
+                               &result)) {
+        return result;
+      }
+    }
+
+    const long double tolerance =
+        1e-12L * std::max(1.0L, result.total_success_mass);
+    SPIEL_CHECK_LE(std::abs(result.enumerated_mass -
+                            result.total_success_mass),
+                   tolerance);
+    result.exact = true;
+    return result;
+  }
+
+  ValueBounds Value(const MarshalBeliefInput& input) {
+    const std::string key = MarshalBeliefKey(input);
+    const auto cached = value_cache_.find(key);
+    if (cached != value_cache_.end()) {
+      ++solver_cache_hits_;
+      return cached->second;
+    }
+
+    if (HiddenHideoutCount(input) == 0) {
+      const ValueBounds terminal{1.0L, 1.0L, -1};
+      value_cache_.emplace(key, terminal);
+      return terminal;
+    }
+
+    const MarshalCompletionResult* completion = Completion(input);
+    if (completion == nullptr ||
+        completion->uniform_consistent_history_mass == 0.0L) {
+      return ValueBounds{};
+    }
+    const long double total = completion->uniform_consistent_history_mass;
+    std::vector<std::pair<int, long double>> candidates;
+    for (int card = kMinCard; card <= 41; ++card) {
+      if (completion->hidden_card_history_mass[card] > 0.0L) {
+        candidates.push_back(
+            {card, completion->hidden_card_history_mass[card]});
+      }
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto& left, const auto& right) {
+                if (left.second != right.second) {
+                  return left.second > right.second;
+                }
+                return left.first < right.first;
+              });
+    SPIEL_CHECK_FALSE(candidates.empty());
+
+    if (options_.max_solver_states != 0 &&
+        solver_states_ >= options_.max_solver_states) {
+      solver_budget_exhausted_ = true;
+      return ValueBounds{0.0L, candidates.front().second / total,
+                         candidates.front().first};
+    }
+    ++solver_states_;
+
+    ValueBounds best{0.0L, 0.0L, candidates.front().first};
+    long double chosen_upper = -1.0L;
+    for (const auto& [card, success_mass] : candidates) {
+      const long double success_probability = success_mass / total;
+      if (success_probability <= best.lower) continue;
+
+      const RevealEnumeration reveal = RevealOutcomes(input, card);
+      long double lower = 0.0L;
+      long double upper = std::max(
+          0.0L, (success_mass - reveal.enumerated_mass) / total);
+      for (const ConditionedRevealOutcome& outcome : reveal.outcomes) {
+        const ValueBounds child = Value(outcome.input);
+        const long double probability =
+            outcome.observation.uniform_consistent_history_mass / total;
+        lower += probability * child.lower;
+        upper += probability * child.upper;
+      }
+      upper = std::min(success_probability, upper);
+
+      if (lower > best.lower ||
+          (lower == best.lower && upper > chosen_upper)) {
+        best.best_guess = card;
+        chosen_upper = upper;
+      }
+      best.lower = std::max(best.lower, lower);
+      best.upper = std::max(best.upper, upper);
+    }
+    best.upper = std::max(best.lower, best.upper);
+    value_cache_.emplace(key, best);
+    return best;
+  }
+
+  MarshalManhuntResult Result(const MarshalBeliefInput& input) {
+    const ValueBounds value = Value(input);
+    return MarshalManhuntResult{
+        /*lower_bound=*/value.lower,
+        /*upper_bound=*/value.upper,
+        /*best_guess=*/value.best_guess,
+        /*solver_states=*/solver_states_,
+        /*solver_cache_hits=*/solver_cache_hits_,
+        /*completion_calls=*/completion_calls_,
+        /*completion_cache_hits=*/completion_cache_hits_,
+        /*positive_reveal_outcomes=*/positive_reveal_outcomes_,
+        /*exact=*/!completion_budget_exhausted_ &&
+            !solver_budget_exhausted_ && EqualBounds(value)};
+  }
+
+  std::uint64_t completion_calls() const { return completion_calls_; }
+
+ private:
+  const MarshalCompletionResult* Completion(
+      const MarshalBeliefInput& input) {
+    const std::string key = MarshalBeliefKey(input);
+    const auto cached = completion_cache_.find(key);
+    if (cached != completion_cache_.end()) {
+      ++completion_cache_hits_;
+      return &cached->second;
+    }
+    if (options_.max_completion_calls != 0 &&
+        completion_calls_ >= options_.max_completion_calls) {
+      completion_budget_exhausted_ = true;
+      return nullptr;
+    }
+    ++completion_calls_;
+    return &completion_cache_
+                .emplace(key, ComputeMarshalCompletion(input))
+                .first->second;
+  }
+
+  std::vector<int> SprintCandidates(const MarshalBeliefInput& input,
+                                    int guessed_card) const {
+    std::array<bool, kMaxCard + 1> known_hideouts{};
+    for (const RoutePositionEvidence& position : input.route) {
+      if (position.known_hideout >= 0) {
+        known_hideouts[position.known_hideout] = true;
+      }
+    }
+    std::vector<int> candidates;
+    for (int card = kMinCard; card <= 41; ++card) {
+      if (card != guessed_card &&
+          !MaskContains(input.unavailable_cards, card) &&
+          !known_hideouts[card]) {
+        candidates.push_back(card);
+      }
+    }
+    return candidates;
+  }
+
+  bool EnumerateSprintSets(
+      const MarshalBeliefInput& input, int card, int position,
+      const std::vector<int>& candidates, int candidate_index, int cards_left,
+      std::vector<int>* selected, RevealEnumeration* result) {
+    if (cards_left == 0) {
+      MarshalBeliefInput conditioned = input;
+      RoutePositionEvidence& evidence = conditioned.route[position];
+      evidence.known_hideout = card;
+      evidence.known_sprint_cards = *selected;
+      evidence.known_sprint_value = 0;
+      evidence.known_sprint_draws = {0, 0, 0};
+      for (int sprint : *selected) {
+        evidence.known_sprint_value += SprintValue(sprint);
+        const int pile = PileForCard(sprint);
+        if (pile >= 0) ++evidence.known_sprint_draws[pile];
+        conditioned.unavailable_cards |= CardBit(sprint);
+      }
+
+      const MarshalCompletionResult* completion = Completion(conditioned);
+      if (completion == nullptr) return false;
+      const long double mass = completion->uniform_consistent_history_mass;
+      if (mass > 0.0L) {
+        result->outcomes.push_back(ConditionedRevealOutcome{
+            MarshalRevealOutcome{position, *selected, mass},
+            std::move(conditioned)});
+        result->enumerated_mass += mass;
+        ++positive_reveal_outcomes_;
+      }
+      return true;
+    }
+
+    if (candidates.size() - candidate_index < cards_left) return true;
+    const int last = candidates.size() - cards_left;
+    for (int index = candidate_index; index <= last; ++index) {
+      selected->push_back(candidates[index]);
+      if (!EnumerateSprintSets(input, card, position, candidates, index + 1,
+                               cards_left - 1, selected, result)) {
+        selected->pop_back();
+        return false;
+      }
+      selected->pop_back();
+    }
+    return true;
+  }
+
+  MarshalManhuntOptions options_;
+  std::unordered_map<std::string, MarshalCompletionResult> completion_cache_;
+  std::unordered_map<std::string, ValueBounds> value_cache_;
+  std::uint64_t solver_states_ = 0;
+  std::uint64_t solver_cache_hits_ = 0;
+  std::uint64_t completion_calls_ = 0;
+  std::uint64_t completion_cache_hits_ = 0;
+  std::uint64_t positive_reveal_outcomes_ = 0;
+  bool completion_budget_exhausted_ = false;
+  bool solver_budget_exhausted_ = false;
+};
+
+std::string ParticleStateKey(const std::vector<int>& particles,
+                             std::uint64_t revealed_positions) {
+  std::string key;
+  key.reserve(12 + 4 * particles.size());
+  AppendKeyInt(&key, revealed_positions, 8);
+  AppendKeyInt(&key, particles.size(), 4);
+  for (int particle : particles) AppendKeyInt(&key, particle, 4);
+  return key;
+}
+
+std::string RevealObservationKey(int position,
+                                 const std::vector<int>& sprint_cards) {
+  std::string key;
+  key.reserve(2 + sprint_cards.size());
+  AppendKeyInt(&key, position, 1);
+  AppendKeyInt(&key, sprint_cards.size(), 1);
+  for (int card : sprint_cards) AppendKeyInt(&key, card, 1);
+  return key;
+}
+
+class SampledManhuntSolver {
+ public:
+  SampledManhuntSolver(const MarshalBeliefInput& input,
+                       std::function<double()>* rng,
+                       MarshalSampledManhuntOptions options)
+      : input_(input), options_(options) {
+    SPIEL_CHECK_GT(options_.particles, 0);
+    particles_.reserve(options_.particles);
+    for (int index = 0; index < options_.particles; ++index) {
+      particles_.push_back(SampleMarshalHistory(input_, *rng));
+    }
+    for (int position = 0; position < input_.route.size(); ++position) {
+      if (input_.route[position].known_hideout < 0) {
+        hidden_positions_ |= std::uint64_t{1} << position;
+      }
+    }
+  }
+
+  MarshalSampledManhuntResult Run() {
+    std::vector<int> root;
+    root.reserve(particles_.size());
+    for (int index = 0; index < particles_.size(); ++index) {
+      root.push_back(index);
+    }
+    const ValueBounds value = Value(root, /*revealed_positions=*/0);
+    return MarshalSampledManhuntResult{
+        /*lower_bound=*/value.lower,
+        /*upper_bound=*/value.upper,
+        /*best_guess=*/value.best_guess,
+        /*particles=*/static_cast<int>(particles_.size()),
+        /*solver_states=*/solver_states_,
+        /*solver_cache_hits=*/solver_cache_hits_,
+        /*exact_for_empirical_belief=*/!solver_budget_exhausted_ &&
+            EqualBounds(value)};
+  }
+
+ private:
+  ValueBounds Value(const std::vector<int>& particle_indices,
+                    std::uint64_t revealed_positions) {
+    if ((revealed_positions & hidden_positions_) == hidden_positions_) {
+      return ValueBounds{1.0L, 1.0L, -1};
+    }
+
+    const std::string state_key =
+        ParticleStateKey(particle_indices, revealed_positions);
+    const auto cached = value_cache_.find(state_key);
+    if (cached != value_cache_.end()) {
+      ++solver_cache_hits_;
+      return cached->second;
+    }
+
+    std::array<int, kMaxCard + 1> success_counts{};
+    for (int particle_index : particle_indices) {
+      const MarshalHistorySample& particle = particles_[particle_index];
+      for (int position = 0; position < particle.route.size(); ++position) {
+        const std::uint64_t position_bit = std::uint64_t{1} << position;
+        if ((hidden_positions_ & position_bit) != 0 &&
+            (revealed_positions & position_bit) == 0) {
+          ++success_counts[particle.route[position]];
+        }
+      }
+    }
+
+    int first_candidate = -1;
+    int maximum_success = 0;
+    for (int card = kMinCard; card <= 41; ++card) {
+      if (success_counts[card] > maximum_success) {
+        first_candidate = card;
+        maximum_success = success_counts[card];
+      }
+    }
+    SPIEL_CHECK_NE(first_candidate, -1);
+    const long double particle_count = particle_indices.size();
+    if (options_.max_solver_states != 0 &&
+        solver_states_ >= options_.max_solver_states) {
+      solver_budget_exhausted_ = true;
+      return ValueBounds{0.0L, maximum_success / particle_count,
+                         first_candidate};
+    }
+    ++solver_states_;
+
+    ValueBounds best{0.0L, 0.0L, first_candidate};
+    long double chosen_upper = -1.0L;
+    for (int card = kMinCard; card <= 41; ++card) {
+      if (success_counts[card] == 0) continue;
+      const long double success_probability =
+          success_counts[card] / particle_count;
+      if (success_probability <= best.lower) continue;
+
+      std::unordered_map<std::string, std::vector<int>> groups;
+      std::unordered_map<std::string, int> group_positions;
+      for (int particle_index : particle_indices) {
+        const MarshalHistorySample& particle = particles_[particle_index];
+        for (int position = 0; position < particle.route.size(); ++position) {
+          const std::uint64_t position_bit = std::uint64_t{1} << position;
+          if ((hidden_positions_ & position_bit) == 0 ||
+              (revealed_positions & position_bit) != 0 ||
+              particle.route[position] != card) {
+            continue;
+          }
+          const std::string outcome_key = RevealObservationKey(
+              position, particle.sprint_cards[position]);
+          groups[outcome_key].push_back(particle_index);
+          group_positions.emplace(outcome_key, position);
+          break;
+        }
+      }
+
+      long double lower = 0.0L;
+      long double upper = 0.0L;
+      for (const auto& [outcome_key, group] : groups) {
+        const int position = group_positions.at(outcome_key);
+        const ValueBounds child =
+            Value(group, revealed_positions | (std::uint64_t{1} << position));
+        const long double probability = group.size() / particle_count;
+        lower += probability * child.lower;
+        upper += probability * child.upper;
+      }
+
+      if (lower > best.lower ||
+          (lower == best.lower && upper > chosen_upper)) {
+        best.best_guess = card;
+        chosen_upper = upper;
+      }
+      best.lower = std::max(best.lower, lower);
+      best.upper = std::max(best.upper, upper);
+    }
+    best.upper = std::max(best.lower, best.upper);
+    value_cache_.emplace(state_key, best);
+    return best;
+  }
+
+  const MarshalBeliefInput& input_;
+  MarshalSampledManhuntOptions options_;
+  std::vector<MarshalHistorySample> particles_;
+  std::uint64_t hidden_positions_ = 0;
+  std::unordered_map<std::string, ValueBounds> value_cache_;
+  std::uint64_t solver_states_ = 0;
+  std::uint64_t solver_cache_hits_ = 0;
+  bool solver_budget_exhausted_ = false;
+};
+
 void ValidateInput(const MarshalBeliefInput& input) {
   SPIEL_CHECK_LE(input.route.size(), kMaxCard);
   for (const auto& rounds : input.fugitive_draw_rounds) {
@@ -898,6 +1357,40 @@ MarshalHistorySample SampleMarshalHistory(const MarshalBeliefInput& input,
   const FixedRouteCompletionResult fixed = fixed_counter.Run();
   SPIEL_CHECK_GT(fixed.mass, 0.0L);
   return fixed_counter.Sample(&rng);
+}
+
+MarshalRevealResult ComputeMarshalRevealOutcomes(
+    const MarshalBeliefInput& input, int card,
+    std::uint64_t max_completion_calls) {
+  ValidateInput(input);
+  ManhuntSolver solver(MarshalManhuntOptions{
+      /*max_completion_calls=*/max_completion_calls,
+      /*max_solver_states=*/0});
+  RevealEnumeration reveal = solver.RevealOutcomes(input, card);
+  MarshalRevealResult result;
+  result.total_success_history_mass = reveal.total_success_mass;
+  result.enumerated_history_mass = reveal.enumerated_mass;
+  result.completion_calls = solver.completion_calls();
+  result.exact = reveal.exact;
+  result.outcomes.reserve(reveal.outcomes.size());
+  for (ConditionedRevealOutcome& outcome : reveal.outcomes) {
+    result.outcomes.push_back(std::move(outcome.observation));
+  }
+  return result;
+}
+
+MarshalManhuntResult ComputeUniformConsistentManhuntValue(
+    const MarshalBeliefInput& input,
+    const MarshalManhuntOptions& options) {
+  ValidateInput(input);
+  return ManhuntSolver(options).Result(input);
+}
+
+MarshalSampledManhuntResult ComputeSampledManhuntValue(
+    const MarshalBeliefInput& input, std::function<double()> rng,
+    const MarshalSampledManhuntOptions& options) {
+  ValidateInput(input);
+  return SampledManhuntSolver(input, &rng, options).Run();
 }
 
 std::unique_ptr<State> ReplayMarshalHistory(

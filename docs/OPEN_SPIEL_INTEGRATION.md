@@ -485,6 +485,170 @@ Route、Completion 和 Marshal sampler 都是 **go**。这不是对所有策略�
 视角保持其私有历史并重采 Marshal 隐藏抽牌；在该独立采样器完成前，game 不覆盖此
 接口，也不接 IS-MCTS。
 
+### 9.1 Manhunt evaluator
+
+Manhunt 猜中后会同时公开路线位置和该位置的具体 Sprint 集合，所以成功观察定义为：
+
+```text
+o = (route_position, exact_sprint_cards)
+```
+
+精确参考递归为：
+
+```text
+V(B) = max_j sum_o mass(B, j, o) / mass(B) * V(B conditioned on j, o)
+```
+
+猜错分支价值为 0；没有隐藏 Hideout 时价值为 1。每个 `j` 的成功 outcome 必须满足
+`sum_o mass(B,j,o) == hidden_card_history_mass[j]`。memo key 包含全部已知 Hideout、
+具体 Sprint、不可用牌和失败猜测。Completion 或 solver-state 预算一旦截断，结果只
+返回保守上下界并令 `exact=false`；公开 reveal API 默认最多 10,000 次 Completion，
+无限预算只用于手工小状态 reference。
+
+完整对局不能只看 Route support。seed 1 的实际 Manhunt 状态只有 10 条 Route，却有
+5 个隐藏位置和 10 张隐藏 Sprint。100,000 次条件 Completion 调用约用 244 ms，枚举
+26,564 个正质量 outcome 后价值区间仍为 `[0.0240463, 1]`，因此完整历史精确递归不
+适合作为在线策略。
+
+完整对局版本改为独立采样 `uniform_consistent` 完整历史，再精确求解这批粒子定义的
+有限 belief 树。观察后直接筛选相容粒子，重复历史仍以重复 particle index 保持经验
+权重。`exact_for_empirical_belief=true` 只表示没有触发 solver-state 截断；结果仍有
+Monte Carlo 误差，不是底层 belief 的置信区间。同一个 seed 1 状态的 profile 为：
+
+| 粒子 | value | 首猜 | solver states | 时间 |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 | 0.875000 | 3 | 305 | 40 ms |
+| 128 | 0.796875 | 3 | 583 | 60 ms |
+| 256 | 0.785156 | 3 | 1,001 | 125 ms |
+
+当前 sampler 每个粒子会重新运行 Completion；如果以后在线反复调用，这里应优先增加
+复用根 Completion 和 route-class 结果的批量采样入口。现阶段保留简单接口并显式报告
+粒子数、求解状态和时间。
+
+### 9.2 L1/L2 配对实验
+
+`fugitive_baseline_experiment` 是独立 C++ runner，不接网页，也不恢复旧 Agent 框架。
+Fugitive-L1 固定抽最低号非空牌堆，普通回合只打距离不超过 3 的最大 Hideout、否则
+Pass；只要 42 出现在 `LegalActions()` 中就优先选择它，随后用现有
+`MinimumSprintAction` 支付最少张数的 Sprint。可达性、Sprint 总值和“42 不能作
+Sprint”都由 game engine 保证，runner 不重复实现。opening 不允许 Pass，因此没有
+距离 3 内的第二张牌时也使用同一个最少 Sprint 逻辑。
+
+为检验死牌烟幕假说，runner 另有 `--dead_card_sprints K`，K 只能取 0、1、2，含义是
+每次普通、非 42 的 Hideout 最多额外打 K 张死牌。死牌只按出牌前的
+`card <= previous_hideout` 定义，不把本次前进后刚变死的牌纳入；候选按
+`(SprintValue, card)` 排序，先消耗奇数牌以保留价值 2 的偶数燃料，选好集合后再按
+数字升序执行原子动作。opening、Pass 和 42 都不使用这条分支。默认 K=0，确保之前的
+实验命令和结果不被静默改变；K=1 是本轮最小非零变体，K=2 只作强度敏感性对照。
+
+Marshal-L2 使用 Completion 的 history-weighted 边缘。guard 的完整判定为：
+
+```text
+G = 按当前 L2 策略在 1..41 构造的实际猜测集
+U = 当前隐藏 Hideout 数
+
+|G| == U              -> 提交 G；成功就会直接揭完全部 U 个位置
+存在正概率的 1..29   -> 在 1..29 内重新构造猜测集
+低牌全部为零概率      -> 按 --low_exhausted 选择 lift 或 wait
+```
+
+`lift` 提交 unrestricted `G`；`wait` 选择牌 1 后 Commit。进入 `wait` 的前提已经证明
+1..29 全为零概率，所以这是明确的策略性伪过牌，不是 Marshal 的合法动作中新增 Pass。
+输出中的 `guard_fallback` 分别报告 lift/wait 的回合数、涉及游戏数，以及成功 lift 导致
+Manhunt 失效的游戏数。普通 argmax 只接受正概率牌，不能再因 `-1` 初值意外选中零概率牌。
+`normal_belief.unrestricted_argmax_ge_30_turns` 直接报告阈值路径出现次数；
+`guard_restriction` 只在第 2 条重建后的实际猜测集与 unrestricted 不同时计数。因此它
+不会把“执行了 guard 判断但动作相同”冒充成策略差异。
+
+默认 L2 会加入所有概率为 1 的 Hideout，再加入一个正概率不确定 argmax。seed 0--999
+中 guard/noguard 都是 1,000 次 Marshal 胜、1 局到 42；F-L1 暴露的确定项仍让路线很快
+被直接揭完，所以默认模式无法检验 30 阈值。
+
+`--guess_mode argmax_only` 提供明确标记的 single-guess 诊断，不冒充默认 L2。同一批
+seed 的结果为：
+
+| 策略 | Marshal | Fugitive | timeout | 到 42 | Manhunt |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| guard (`lift`) | 983 | 17 | 0 | 121 | 121（Marshal 胜 104） |
+| noguard | 983 | 17 | 0 | 121 | 121（Marshal 胜 104） |
+
+这一批对局共使用 1,484 张 Sprint，其中 529 张来自强制开局，新增的 955 张全部来自
+L1 打 42。原来的 21 个 timeout 已消失。扩大到 10,000 seed 后，`lift` 只触发 1 回合
+且猜错，guard/noguard 终局分布仍同为 `9,774 M / 226 F / 0 timeout`；改用 `wait` 也只
+触发 1 回合，并使对应一局的 Manhunt 结果由 Marshal 胜变为 Fugitive 胜。两种配置都
+有 1,265 局到 42。
+
+这说明 `--dead_card_sprints 0` 的旧 L1 matchup 本身仍无法测 N11：它虽然能制造最终
+Sprint 和更多 Manhunt，普通路线位置却没有 Sprint，最高边缘从不进入 30 以上。后续
+实验必须先改变 Fugitive 侧的公开 Sprint 形状，不能只拆 Marshal 的提交规则。
+
+上面是 `--dead_card_sprints 0` 的旧 L1 对照。加入普通回合死牌烟幕后，同一批
+seed 0--999、single-guess L2、64 个 Manhunt 粒子的结果为：
+
+| 每次最多死牌 K | guard M/F/TO | noguard M/F/TO | guard 高牌 argmax | guard 真正限制 | guard 到 42 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 983 / 17 / 0 | 983 / 17 / 0 | 0 | 0 | 121 |
+| 1 | 971 / 29 / 0 | 973 / 27 / 0 | 104 | 25 | 34 |
+| 2 | 972 / 28 / 0 | 971 / 29 / 0 | 112 | 27 | 34 |
+
+K=1 的 guard 一侧实际打出 2,475 张普通死牌 Sprint；K=2 为 2,913 张。两者都立即让
+最高边缘进入 30 以上，并让第 2 条 guard 真正改变动作，验证了死牌烟幕假说的机制。
+代价也很明显：到 42 从 121 局降到约 34 局，死牌仍是
+最终冲刺燃料，不能称为免费资源。
+
+K=1、`low_exhausted=lift` 扩大到 10,000 seed 后，guard 为
+`9743 M / 257 F / 0 TO`，noguard 为 `9736 M / 264 F / 0 TO`。guard 侧共有 953 个
+高牌 argmax 节点，第 2 条真正改动 216 次；47 个配对 seed 改变胜者，其中 guard 独赢
+27 局、noguard 独赢 20 局。这个净差只有 7 局，而且 1,000 seed 的方向相反，足以证明
+N11 已进入决策路径，不足以证明稳定的胜率优势。
+
+`low_exhausted=wait` 不适合作为主结果。K=1 在 `max_rounds=50/100/200` 时始终是同一
+7 局达到 horizon，胜负分布也完全不变；只有 wait 次数从 297 增至 647、1,347。
+这说明它们是低牌概率耗尽后的策略循环，不是墙钟性能超时，也不能作为 guard 收益。
+
+### 9.3 Marshal 强制赌博消融
+
+`--guess_mode` 把原来的布尔开关拆成三种完整策略。设 `C` 是候选范围内全部概率为 1
+的牌，`A` 是全部正概率牌的 argmax，`A?` 是非确定正概率牌的 argmax：
+
+```text
+argmax_only          -> 提交 A
+certain_only         -> C 非空时提交全部 C；否则提交 A
+certain_plus_argmax  -> 先提交 C；若 |C| < U，再追加 A?
+```
+
+并列概率统一选择最小牌号。`certain_only` 的 fallback 是必要定义：Marshal 没有 Pass，
+没有确定项时不能提交空集合。默认仍是 `certain_plus_argmax`。旧参数
+`--add_certain_guesses 0|1` 分别映射到 `argmax_only / certain_plus_argmax`，只用于复现
+旧命令；同一次调用不能再同时指定 `--guess_mode`。
+
+每种模式先在 1..41 构造真实猜测集，再走同一套 guard。若实际 `|G| == U`，成功后就会
+覆盖全部隐藏位置，因此直接绕过 30 限制；否则才在 1..29 重建或进入 lift/wait。
+`guess_mode_diagnostics` 报告：
+
+- `forced_gamble.turns/losses/certain_cards_lost`：实际提交至少一张确定牌并追加非确定
+  argmax，以及失败时丢掉的确定揭示；
+- `banked_certain.turns/cards`：certain-only 在尚未覆盖全部隐藏位置时只拿确定进展；
+- `cover_all.attempts/wins`：实际猜测数等于隐藏位置数，以及其中成功终局的次数。
+
+旧 K=0、300 seed 的复跑精确得到 review 的插桩数字：249 次强制赌博、141 次失败
+（56.6%），并进一步量出失败时共丢掉 218 张确定揭示。这证明局部成本真实存在，但
+不能单独推出整局策略较差。
+
+正式消融固定 K=1、seed 0--9999、64 个 Manhunt 粒子和 `low_exhausted=lift`。三种模式
+各自仍输出 guard/noguard 配对；强制赌博的主比较使用 noguard，避免把 30 阈值混入：
+
+| guess mode | guard M/F | noguard M/F | noguard 平均回合 | 关键诊断（noguard） |
+| --- | ---: | ---: | ---: | --- |
+| `argmax_only` | 9743 / 257 | 9736 / 264 | 7.00 | cover-all 成功 9,656 |
+| `certain_only` | 9927 / 73 | 9930 / 70 | 6.33 | bank 9,661 回合 / 10,853 张确定牌 |
+| `certain_plus_argmax` | 9997 / 3 | 9998 / 2 | 5.01 | 赌博 8,872 次，失败 2,930 次，丢 3,504 张确定牌 |
+
+排序在 1,000 和 10,000 seed 中一致。plus 虽然约三分之一的赌博失败，却更快制造
+cover-all 终局：noguard 的 16,493 次 cover-all 尝试中 9,998 次成功，最终只输 2 局。
+因此在当前确定性 L1-smoke 对手上，“强制赌博”有明确的净收益；它的风险应当被记录，
+但没有理由从默认 L2 中删除。这个结论只属于该 matchup，不是最优性证明。
+
 ## 10. 更新 OpenSpiel 版本
 
 上游升级不是简单改 tag。至少要按以下顺序处理：
