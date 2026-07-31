@@ -616,8 +616,8 @@ class FixedRouteCompletionCounter {
 class CompletionCounter {
  public:
   explicit CompletionCounter(const MarshalBeliefInput& input,
-                             std::function<double()>* sample_rng = nullptr)
-      : input_(input), search_(input), sample_rng_(sample_rng) {
+                             bool collect_routes = false)
+      : input_(input), search_(input), collect_routes_(collect_routes) {
     route_.reserve(input.route.size());
   }
 
@@ -626,9 +626,27 @@ class CompletionCounter {
     return result_;
   }
 
-  const std::vector<int>& sampled_route() const {
-    SPIEL_CHECK_FALSE(sampled_route_.empty());
-    return sampled_route_;
+  struct WeightedRoute {
+    std::vector<int> route;
+    long double mass = 0.0L;
+  };
+
+  const std::vector<WeightedRoute>& completable_routes() const {
+    SPIEL_CHECK_TRUE(collect_routes_);
+    return completable_routes_;
+  }
+
+  const std::vector<int>& SampleRoute(std::function<double()>* rng) const {
+    SPIEL_CHECK_TRUE(collect_routes_);
+    SPIEL_CHECK_FALSE(completable_routes_.empty());
+    long double total = 0.0L;
+    const WeightedRoute* selected = &completable_routes_.back();
+    for (const WeightedRoute& route : completable_routes_) {
+      total += route.mass;
+      if (DrawUnit(rng) * total < route.mass) selected = &route;
+    }
+    SPIEL_CHECK_GT(total, 0.0L);
+    return selected->route;
   }
 
  private:
@@ -664,9 +682,8 @@ class CompletionCounter {
         }
         const long double new_mass =
             result_.uniform_consistent_history_mass + completion.mass;
-        if (sample_rng_ != nullptr &&
-            DrawUnit(sample_rng_) * new_mass < completion.mass) {
-          sampled_route_ = route_;
+        if (collect_routes_) {
+          completable_routes_.push_back(WeightedRoute{route_, completion.mass});
         }
         result_.uniform_consistent_history_mass = new_mass;
       }
@@ -704,12 +721,47 @@ class CompletionCounter {
   const MarshalBeliefInput& input_;
   RouteConstraintSearch search_;
   std::vector<int> route_;
-  std::vector<int> sampled_route_;
-  std::function<double()>* sample_rng_;
+  bool collect_routes_ = false;
+  std::vector<WeightedRoute> completable_routes_;
   std::unordered_map<std::string, FixedRouteCompletionResult>
       completion_cache_;
   MarshalCompletionResult result_;
 };
+
+std::string ExactRouteKey(const std::vector<int>& route) {
+  std::string key;
+  key.reserve(route.size() + 1);
+  key.push_back(static_cast<char>(route.size()));
+  for (int card : route) key.push_back(static_cast<char>(card));
+  return key;
+}
+
+std::vector<MarshalHistorySample> SampleMarshalHistories(
+    const MarshalBeliefInput& input, int count,
+    std::function<double()>* rng) {
+  SPIEL_CHECK_GT(count, 0);
+  CompletionCounter route_counter(input, /*collect_routes=*/true);
+  const MarshalCompletionResult completion = route_counter.Run();
+  SPIEL_CHECK_GT(completion.uniform_consistent_history_mass, 0.0L);
+
+  std::vector<MarshalHistorySample> samples(count);
+  std::unordered_map<std::string,
+                     std::unique_ptr<FixedRouteCompletionCounter>> counters;
+  for (MarshalHistorySample& sample : samples) {
+    const std::vector<int>& route = route_counter.SampleRoute(rng);
+    const std::string key = ExactRouteKey(route);
+    auto found = counters.find(key);
+    if (found == counters.end()) {
+      auto counter = std::make_unique<FixedRouteCompletionCounter>(input,
+                                                                    route);
+      const FixedRouteCompletionResult fixed = counter->Run();
+      SPIEL_CHECK_GT(fixed.mass, 0.0L);
+      found = counters.emplace(key, std::move(counter)).first;
+    }
+    sample = found->second->Sample(rng);
+  }
+  return samples;
+}
 
 void ApplyChecked(State* state, Action action) {
   const std::vector<Action> legal = state->LegalActions();
@@ -1040,10 +1092,7 @@ class SampledManhuntSolver {
                        MarshalSampledManhuntOptions options)
       : input_(input), options_(options) {
     SPIEL_CHECK_GT(options_.particles, 0);
-    particles_.reserve(options_.particles);
-    for (int index = 0; index < options_.particles; ++index) {
-      particles_.push_back(SampleMarshalHistory(input_, *rng));
-    }
+    particles_ = SampleMarshalHistories(input_, options_.particles, rng);
     for (int position = 0; position < input_.route.size(); ++position) {
       if (input_.route[position].known_hideout < 0) {
         hidden_positions_ |= std::uint64_t{1} << position;
@@ -1348,15 +1397,7 @@ MarshalCompletionResult ComputeMarshalCompletion(
 MarshalHistorySample SampleMarshalHistory(const MarshalBeliefInput& input,
                                           std::function<double()> rng) {
   ValidateInput(input);
-  CompletionCounter route_counter(input, &rng);
-  const MarshalCompletionResult completion = route_counter.Run();
-  SPIEL_CHECK_GT(completion.uniform_consistent_history_mass, 0.0L);
-
-  FixedRouteCompletionCounter fixed_counter(input,
-                                             route_counter.sampled_route());
-  const FixedRouteCompletionResult fixed = fixed_counter.Run();
-  SPIEL_CHECK_GT(fixed.mass, 0.0L);
-  return fixed_counter.Sample(&rng);
+  return SampleMarshalHistories(input, /*count=*/1, &rng).front();
 }
 
 MarshalRevealResult ComputeMarshalRevealOutcomes(

@@ -521,9 +521,9 @@ Monte Carlo 误差，不是底层 belief 的置信区间。同一个 seed 1 状�
 | 128 | 0.796875 | 3 | 583 | 60 ms |
 | 256 | 0.785156 | 3 | 1,001 | 125 ms |
 
-当前 sampler 每个粒子会重新运行 Completion；如果以后在线反复调用，这里应优先增加
-复用根 Completion 和 route-class 结果的批量采样入口。现阶段保留简单接口并显式报告
-粒子数、求解状态和时间。
+当前 sampler 已改为一次枚举 Route/Completion 支持，再按具体 Route 复用
+`FixedRouteCompletionCounter` 的 memo；公开 API 和抽样顺序不变。它只把重复工作移到
+一次批量调用中，仍显式报告粒子数、求解状态和时间。
 
 #### 9.1.1 粒子数收敛检查
 
@@ -535,7 +535,7 @@ Monte Carlo 误差，不是底层 belief 的置信区间。同一个 seed 1 状�
 离线检查把经验 belief solver 的 state budget 设为无限；主一致率和 value 差异只统计
 两边都 `exact_for_empirical_belief=true` 的配对。程序逐次输出 bounds、首猜、实际
 `rng_seed`、solver states 和时间；逐 checkpoint 汇总还保存完整 `information_state`，便于
-后续实现批量 sampler 时复用完全相同的 belief。逐 checkpoint 汇总 value 均值/标准差、modal 首猜，
+批量 sampler 优化前后复用完全相同的 belief。逐 checkpoint 汇总 value 均值/标准差、modal 首猜，
 全局只汇总与 reference 的配对差异及成本，不把不同状态的原始 value 混成一个均值。
 
 复现命令：
@@ -552,17 +552,25 @@ seed 0 开始检查 21 局后收集到 16 个入口；隐藏位置为 3--8，隐
 
 | 粒子 | 对 512 首猜一致率 | value 平均绝对差 | value p95 绝对差 | 时间 p50 | 时间 p95 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 64 | 85.5% | 0.0727 | 0.1797 | 48 ms | 1.24 s |
-| 128 | 89.8% | 0.0523 | 0.1406 | 96 ms | 2.48 s |
-| 256 | 93.0% | 0.0282 | 0.0781 | 192 ms | 4.96 s |
-| 512 reference | 100% | 0 | 0 | 385 ms | 9.92 s |
+| 64 | 85.5% | 0.0727 | 0.1797 | 2.5 ms | 24.9 ms |
+| 128 | 89.8% | 0.0523 | 0.1406 | 4.3 ms | 27.4 ms |
+| 256 | 93.0% | 0.0282 | 0.0781 | 6.8 ms | 31.2 ms |
+| 512 reference | 100% | 0 | 0 | 12.0 ms | 36.9 ms |
 
-总墙钟 626 s，峰值 RSS 12,688 KiB。16 个状态中有 15 个的跨 seed 平均 value 从
+批量版本总墙钟 8.1 s，峰值 RSS 13,076 KiB；优化前同一数据为 626 s，且每一项
+首猜、value 和 solver states 都相同。16 个状态中有 15 个的跨 seed 平均 value 从
 64 到 512 单调下降，剩余一个始终为 1；这与小样本上先对多个动作取最大值产生的乐观
-效应一致，也说明 512 本身尚未给出稳定极限。当前结论不是“改用 512”，而是：64 已经
-没有通过收敛检查，256 仍未达到 value 差异门槛，而更高粒子数被逐粒子重复 Completion
-的长尾挡住。下一步先做共享 Completion 的批量 sampler，再用更高 reference 重跑；
-在此之前不开始依赖连续 Manhunt value 的 N14。
+效应一致，也说明 512 本身尚未给出稳定极限。
+
+批量版本进一步将 reference 推到 16,384（同样 16 个入口、16 条 seed）：
+
+| 比较 | 首猜一致率 | value 平均绝对差 | value p90 | 较大档 p95 时间 |
+| --- | ---: | ---: | ---: | ---: |
+| 8,192 vs 16,384 | 91.0% | 0.0202 | 0.0456 | 914.6 ms |
+
+因此当前可把 16,384 称为离线 reference，把 8,192 视为可用的近似档；两者都不是
+底层 uniform-consistent belief 的真值。64 已被收敛初筛否决，N14 可以在明确报告这项
+evaluator 敏感性的前提下开始，但不能把 Rao-Blackwell 回报宣称为实际 L1 对局的无偏值。
 
 ### 9.2 L1/L2 配对实验
 
